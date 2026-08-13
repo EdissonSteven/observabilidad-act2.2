@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Artefactos de depuración del MCP de Playwright (screenshots/snapshots de trabajo)
+.playwright-mcp/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+tfplan
+
+# Reporte exportado (se genera localmente, no se versiona el binario)
+docs/reporte-tecnico.pdf

@@ -1,0 +1,168 @@
+# Stack local completo del laboratorio de observabilidad.
+#
+#   docker compose up -d --build
+#   docker compose ps
+#
+# Accesos:
+#   service-a          http://localhost:8000/docs
+#   service-b          http://localhost:8001/docs
+#   Jaeger UI          http://localhost:16686
+#   Grafana            http://localhost:3001  (admin/admin)
+#   Prometheus         http://localhost:9091
+#   Tempo API          http://localhost:3200
+#   OTel Collector     http://localhost:13133/  (health) · :55679 (zpages)
+
+networks:
+  otel-net:
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks: [otel-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./otel-collector/collector-config.local.yaml:/etc/otel/collector-config.yaml:ro
+    environment:
+      ENVIRONMENT: local
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "8888:8888"    # Métricas internas del Collector
+      - "8889:8889"    # Métricas de las apps (Prometheus scraping)
+      - "13133:13133"  # Health check
+      - "55679:55679"  # zPages
+    networks: [otel-net]
+    depends_on:
+      jaeger: { condition: service_healthy }
+      tempo: { condition: service_started }
+      loki: { condition: service_started }
+    # otelcol-contrib es una imagen distroless (sin wget/curl/shell), así
+    # que no se puede healthcheckear con un exec desde dentro del propio
+    # contenedor. Verificar salud desde el host: curl http://localhost:13133/
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+    networks: [otel-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"
+    networks: [otel-net]
+
+  loki:
+    image: grafana/loki:3.0.0
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./observability/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks: [otel-net]
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-remote-write-receiver"
+    volumes:
+      - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9091:9090"
+    networks: [otel-net]
+    depends_on: [otel-collector]
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    networks: [otel-net]
+    depends_on: [prometheus, jaeger, loki, tempo]
+
+  service-a:
+    build: ./services/service-a
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      SERVICE_B_URL: http://service-b:8001
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      PROMETHEUS_PORT: "9090"
+      ENVIRONMENT: local
+      CLOUD_PROVIDER: local
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    networks: [otel-net]
+    depends_on:
+      postgres: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  service-b:
+    build: ./services/service-b
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      PROMETHEUS_PORT: "9091"
+      ENVIRONMENT: local
+      CLOUD_PROVIDER: local
+    ports:
+      - "8001:8001"
+      - "9092:9091"
+    networks: [otel-net]
+    depends_on:
+      postgres: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

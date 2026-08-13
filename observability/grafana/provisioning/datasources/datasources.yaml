@@ -1,0 +1,68 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    uid: prometheus
+    isDefault: true
+    jsonData:
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: jaeger
+
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: jaeger
+    jsonData:
+      # Traza -> logs: arma una consulta LogQL a partir del trace_id del
+      # span seleccionado. trace_id NO es un label indexado en Loki (alta
+      # cardinalidad); se filtra vía `| json` sobre el cuerpo del log.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+        customQuery: true
+        query: '{service_name="${__span.tags["service.name"]}"} | json | traceid="${__span.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus
+        queries:
+          - name: "Request rate del servicio"
+            query: 'rate(http_requests_total{endpoint=~".+"}[5m])'
+      nodeGraph:
+        enabled: true
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        customQuery: true
+        query: '{service_name="${__span.tags["service.name"]}"} | json | traceid="${__span.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki
+    jsonData:
+      # Logs -> traza: detecta el trace_id dentro del JSON del log y ofrece
+      # el botón "ver traza" que salta directo al flame graph en Jaeger.
+      derivedFields:
+        - datasourceUid: jaeger
+          matcherRegex: '"traceid":"([0-9a-f]{32})"'
+          name: trace_id
+          url: "${__value.raw}"
+          urlDisplayLabel: "Ver traza en Jaeger"

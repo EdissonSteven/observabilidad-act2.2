@@ -1,0 +1,12 @@
+{
+  "mode": "baseline",
+  "timestamp": "2026-08-06T16:27:44.184Z",
+  "metrics": {
+    "latency_avg_ms": 1059.9181533472179,
+    "latency_p95_ms": 1290.0514429499997,
+    "latency_p99_ms": 1399.9399858999998,
+    "error_rate_pct": 0,
+    "throughput_rps": 43.38815304317488,
+    "total_requests": 13902
+  }
+}

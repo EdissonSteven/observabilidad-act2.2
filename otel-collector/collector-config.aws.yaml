@@ -1,0 +1,92 @@
+# Variante AWS: pensada para correr como sidecar dentro de cada task
+# definition de ECS Fargate (ver iac/terraform/aws). No se ejecuta en este
+# laboratorio -- se documenta y se deja lista para desplegar.
+#
+# Backend de trazas elegido: Tempo (no X-Ray), para mantener el mismo
+# formato OTLP nativo y la misma correlación log<->traza vía Grafana
+# Explorer que se usa en el lado GCP (ver docs/reporte-tecnico.md).
+# Logs -> CloudWatch Logs, vía el rol IAM de la task (aws_iam_role en
+# iac/terraform/aws), sin credenciales embebidas en este archivo.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  resource:
+    attributes:
+      - action: insert
+        key: deployment.environment
+        value: ${env:ENVIRONMENT}
+      - action: insert
+        key: cloud.provider
+        value: aws
+
+  resourcedetection:
+    detectors: [env, ecs]
+    timeout: 10s
+    override: false
+
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.target"] == "/health"'
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  otlp/tempo:
+    endpoint: ${env:TEMPO_ENDPOINT}
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  awscloudwatchlogs:
+    log_group_name: /otel-lab/services
+    log_stream_name: otel-collector
+    region: ${env:AWS_REGION}
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, resourcedetection, filter/health, batch]
+      exporters: [otlp/tempo]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, resourcedetection, batch]
+      exporters: [prometheus]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, resourcedetection, batch]
+      exporters: [awscloudwatchlogs]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

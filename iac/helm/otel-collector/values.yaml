@@ -1,0 +1,80 @@
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.103.0"
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+service:
+  type: ClusterIP # switch to LoadBalancer to accept OTLP from outside the cluster
+  ports:
+    otlpGrpc: 4317
+    otlpHttp: 4318
+    metrics: 8888
+    health: 13133
+
+# Rendered verbatim into the ConfigMap the Deployment mounts at
+# /etc/otel/collector-config.yaml. Same receivers/processors shape as the
+# docker-compose collector config; exporters are placeholders — point them
+# at real backends (Tempo/Jaeger, Prometheus remote-write, Cloud Logging,
+# etc.) per environment by overriding this value, not by editing the chart.
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    batch: {}
+    resource:
+      attributes:
+        - key: deployment.environment
+          value: lab
+          action: upsert
+
+  exporters:
+    logging:
+      verbosity: normal
+    otlp:
+      endpoint: "tempo:4317" # placeholder — override per environment (Tempo/Jaeger/Cloud Trace)
+      tls:
+        insecure: true
+
+  extensions:
+    health_check:
+      endpoint: 0.0.0.0:13133
+
+  service:
+    extensions: [health_check]
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch, resource]
+        exporters: [logging, otlp]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, batch, resource]
+        exporters: [logging]
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, batch, resource]
+        exporters: [logging]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

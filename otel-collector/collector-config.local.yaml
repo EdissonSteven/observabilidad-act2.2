@@ -1,0 +1,99 @@
+# Collector local (docker-compose): usado para desarrollo, pruebas y para
+# generar toda la evidencia (capturas, dashboards, benchmark) del laboratorio.
+# No requiere credenciales de nube -- ver collector-config.gcp.yaml y
+# collector-config.aws.yaml para las variantes de despliegue real.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins: ["*"]
+
+processors:
+  # Primero en el pipeline: si hay un pico de telemetría, el Collector
+  # empieza a rechazar datos antes de agotar la RAM del contenedor y caerse.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  resource:
+    attributes:
+      - action: insert
+        key: deployment.environment
+        value: ${env:ENVIRONMENT}
+      - action: insert
+        key: cloud.provider
+        value: local
+
+  # Health checks no aportan valor diagnóstico y contaminan las trazas con
+  # ruido de scraping cada pocos segundos.
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.target"] == "/health"'
+
+  # Último del pipeline: agrupa spans/métricas/logs antes de exportar.
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otelcol
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, filter/health, batch]
+      exporters: [otlp/jaeger, otlp/tempo, debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [loki, debug]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

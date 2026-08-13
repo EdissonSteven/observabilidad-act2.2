@@ -1,0 +1,12 @@
+{
+  "mode": "otel",
+  "timestamp": "2026-08-06T16:21:44.157Z",
+  "metrics": {
+    "latency_avg_ms": 1212.8749454165923,
+    "latency_p95_ms": 1607.3990322999998,
+    "latency_p99_ms": 1918.3597450999966,
+    "error_rate_pct": 0,
+    "throughput_rps": 38.84431068890298,
+    "total_requests": 12463
+  }
+}

@@ -1,0 +1,26 @@
+otel-collector ({{ .Chart.AppVersion }}) deployed as {{ include "otel-collector.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+In-cluster OTLP endpoints for service-a / service-b:
+  gRPC: {{ include "otel-collector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.ports.otlpGrpc }}
+  HTTP: {{ include "otel-collector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.ports.otlpHttp }}
+
+Check rollout status:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "otel-collector.fullname" . }}
+
+{{- if eq .Values.service.type "ClusterIP" }}
+
+Service type is ClusterIP (default) — reachable only from inside the cluster.
+To send OTLP data from outside, either port-forward:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "otel-collector.fullname" . }} 4317:4317
+or re-install with `--set service.type=LoadBalancer`.
+{{- else }}
+
+Service type is {{ .Values.service.type }}. Fetch its external address with:
+  kubectl -n {{ .Release.Namespace }} get svc {{ include "otel-collector.fullname" . }}
+{{- end }}
+
+Exporters in the current config are placeholders (see values.yaml `config.exporters`) —
+override them per environment, e.g.:
+  helm upgrade {{ .Release.Name }} ./iac/helm/otel-collector \
+    -n {{ .Release.Namespace }} \
+    --set-string config.exporters.otlp.endpoint=tempo.observability.svc.cluster.local:4317

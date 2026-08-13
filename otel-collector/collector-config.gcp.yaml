@@ -1,0 +1,96 @@
+# Variante GCP: pensada para correr como Deployment en GKE (ver
+# iac/terraform/gcp y iac/helm/otel-collector). No se ejecuta en este
+# laboratorio -- se documenta y se deja lista para desplegar (ver
+# docs/reporte-tecnico.md, sección de decisiones de diseño).
+#
+# Diferencias frente a collector-config.local.yaml:
+#   - resourcedetection agrega automáticamente project_id, zona y nombre de
+#     nodo del pod GKE a cada señal.
+#   - Traces -> Jaeger (desplegado como Deployment en el mismo namespace).
+#   - Metrics -> Prometheus scraping endpoint (consumido por el Prometheus
+#     del clúster o por Google Managed Prometheus).
+#   - Logs -> Cloud Logging, usando Workload Identity del Service Account
+#     del pod (sin credenciales embebidas en este archivo).
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  resource:
+    attributes:
+      - action: insert
+        key: deployment.environment
+        value: ${env:ENVIRONMENT}
+      - action: insert
+        key: cloud.provider
+        value: gcp
+
+  resourcedetection:
+    detectors: [env, gcp]
+    timeout: 10s
+    override: false
+
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.target"] == "/health"'
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger.observability.svc.cluster.local:4317
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  googlecloud:
+    project: ${env:GCP_PROJECT_ID}
+    log:
+      default_log_name: otel-lab
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, resourcedetection, filter/health, batch]
+      exporters: [otlp/jaeger, googlecloud]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, resourcedetection, batch]
+      exporters: [prometheus, googlecloud]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, resourcedetection, batch]
+      exporters: [googlecloud]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

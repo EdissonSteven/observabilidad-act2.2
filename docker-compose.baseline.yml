@@ -1,0 +1,17 @@
+# Overlay para el benchmark de la Fase 4 (análisis de overhead).
+#
+#   Con OTel:  docker compose up -d --force-recreate service-a service-b
+#   Baseline:  docker compose -f docker-compose.yaml -f docker-compose.baseline.yml \
+#                up -d --force-recreate service-a service-b
+#
+# OTEL_SDK_DISABLED=true hace que telemetry.py no registre ningún
+# TracerProvider/MeterProvider ni instrumente ninguna librería (ver
+# services/*/app/telemetry.py) -- es el baseline real, no solo apagar el
+# Collector.
+services:
+  service-a:
+    environment:
+      OTEL_SDK_DISABLED: "true"
+  service-b:
+    environment:
+      OTEL_SDK_DISABLED: "true"
