@@ -74,6 +74,9 @@ Cliente / k6  ──HTTP GET /orders/{id}──▶  service-a :8000
                                correlación trace_id ↔ logs ↔ métricas)
 ```
 
+Versión visual del mismo flujo — ver gráfico
+[`docs/charts/04_diagrama_arquitectura.png`](charts/04_diagrama_arquitectura.png).
+
 **Componentes y puertos (stack local):**
 
 | Componente | Rol | Puerto host |
@@ -369,7 +372,11 @@ compartido con otros contenedores — ver limitaciones en 6.4):
 
 Latencia adicional en p99: **+518.42 ms (+37.0%)**. Total de requests:
 13 902 (baseline) y 12 463 (con OTel) en sus respectivas ventanas de 5
-minutos.
+minutos — ver gráfico [`docs/charts/01_latencia_baseline_vs_otel.png`](charts/01_latencia_baseline_vs_otel.png).
+
+Throughput: -10.5% con OTel, consistente con la cola de requests generada
+por el bloqueo del event loop (ver 6.3) — ver gráfico
+[`docs/charts/02_throughput_baseline_vs_otel.png`](charts/02_throughput_baseline_vs_otel.png).
 
 Memoria RSS por contenedor (muestreada con `docker stats` durante ráfagas
 cortas de carga, contenedor recién reiniciado en ambos casos para que la
@@ -381,15 +388,41 @@ comparación parta del mismo estado):
 | `service-b` | ≈ 51 MB | ≈ 58 MB | ≈ +12.5% |
 | `otel-collector` | — (no existe en baseline) | ≈ 70 MB | proceso adicional |
 
-Los porcentajes de CPU muestreados con `docker stats` resultaron **con
-demasiado ruido para reportarse como cifra confiable** (variaban 15-38% entre
-muestras de 2 segundos, sin una dirección consistente): Docker Desktop en
-Windows corre los contenedores dentro de una VM compartida con scheduling de
-CPU que no es determinístico bajo ráfagas cortas. Para una medición de CPU
-rigurosa se necesitaría un perfilado continuo sobre toda la ventana de 5
-minutos (p. ej. `docker stats` muestreado cada segundo y promediado, o
-`cgroup cpu.stat` antes/después), no snapshots puntuales — queda como
-trabajo futuro (sección 9).
+Ver gráfico [`docs/charts/03_memoria_rss_baseline_vs_otel.png`](charts/03_memoria_rss_baseline_vs_otel.png).
+
+CPU promedio por contenedor, muestreado con `docker stats --no-stream` cada
+~1-2s durante toda la ventana de carga (60 VUs, 5 min) y promediado sobre
+todas las muestras — no un snapshot puntual como en un intento anterior, que
+había resultado con demasiado ruido (variaba 15-38% entre muestras de 2s sin
+dirección consistente) para reportarse como cifra confiable:
+
+| Contenedor | Sin OTel (baseline) | Con OTel SDK | Overhead |
+|---|---|---|---|
+| `service-a` | 56.92% | 60.45% | +3.53 pp (+6.2%) |
+| `service-b` | 3.48% | 6.59% | +3.11 pp (+89.5%) |
+| `otel-collector` | 0.23% | 1.54% | +1.32 pp (+584.6%) |
+
+Ver gráfico [`docs/charts/05_cpu_baseline_vs_otel.png`](charts/05_cpu_baseline_vs_otel.png).
+
+`service-a` domina el consumo porque es el orquestador que atiende las 60
+VUs directamente y hace la llamada saliente a `service-b` (ver 6.3 sobre el
+event loop bloqueado). El overhead relativo de `service-b` y
+`otel-collector` se ve inflado en términos porcentuales por tener una base
+muy baja (3-4% de un solo core) — en puntos porcentuales absolutos el
+overhead de los tres procesos es comparable (+1.3 a +3.5 pp).
+
+**Nota de método:** esta corrida de CPU se ejecutó por separado de la
+corrida "oficial" de latencia de la tabla anterior (mismo `docker-compose`,
+mismo script k6, mismos 60 VUs/5 min, pero en una ejecución distinta) porque
+el propio proceso de muestreo (`docker stats` invocado cada 1-2s desde el
+host) compite por CPU en la VM compartida de Docker Desktop y distorsiona la
+latencia si se mide en la misma corrida que genera la carga — se confirmó
+empíricamente: la latencia p99 subía ~2x apenas se activaba el sampler,
+igual en baseline que en OTel. Por eso los números de latencia/throughput de
+6.2 vienen de la corrida limpia (sin sampler) y los de CPU de una corrida
+aparte con metodología idéntica en ambos modos, así que el overhead
+*relativo* de CPU entre baseline y OTel sigue siendo válido aunque no se
+mezcle con los valores absolutos de latencia.
 
 ### 6.3 Interpretación: por qué el overhead es más alto que la referencia de la industria
 
@@ -433,6 +466,10 @@ concurrencia.
 - Solo se ejecutó una repetición por modo (no N corridas con intervalo de
   confianza). Para una decisión de producción se recomienda repetir cada
   escenario 3-5 veces.
+- La medición de CPU (6.2) viene de una corrida separada de la de
+  latencia/throughput, por la interferencia del propio sampler descrita
+  arriba — es una única repetición por modo, igual que la de latencia, no
+  un promedio de múltiples corridas independientes.
 
 ---
 
@@ -563,7 +600,12 @@ muestra un dashboard contra una medición manual independiente.
   real.
 - Ejecutar el benchmark en un entorno aislado (no una laptop de desarrollo
   compartida) y con múltiples repeticiones, para obtener intervalos de
-  confianza sobre el overhead de CPU.
+  confianza sobre el overhead de CPU y de latencia (hoy: una sola corrida
+  por modo para cada uno).
+- Medir CPU y latencia en la misma corrida sin interferencia mutua (por
+  ejemplo, muestreando CPU desde `cgroup cpu.stat` dentro del propio
+  contenedor en vez de `docker stats` desde el host), para no depender de
+  dos corridas separadas como en 6.2.
 - Aplicar el Terraform de `iac/` contra un proyecto GCP/cuenta AWS de
   prueba y capturar las mismas evidencias (trazas, dashboard) que aquí se
   capturaron localmente, para confirmar paridad de comportamiento entre

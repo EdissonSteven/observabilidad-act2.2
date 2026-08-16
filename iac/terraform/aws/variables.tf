@@ -65,16 +65,28 @@ variable "otel_collector_image" {
 }
 
 variable "database_url" {
-  description = "Fallback plain-text DATABASE_URL (postgresql://user:pass@host:5432/appdb), used only if database_url_secret_arn is unset. Dev/demo only -- prefer the secret."
+  description = "Fallback plain-text DATABASE_URL (postgresql://user:pass@host:5432/appdb), used only if database_url_secret_arn is unset. Dev/demo only -- prefer the secret. Default points at this module's own Postgres Fargate service via Cloud Map (namespace \"<project_name>.local\") -- if you change project_name from its default \"observability-lab\", update this default too or pass -var."
   type        = string
-  default     = "postgresql://app:secret@postgres.internal:5432/appdb"
+  default     = "postgresql://app:secret@postgres.observability-lab.local:5432/appdb"
   sensitive   = true
+}
+
+variable "db_admin_cidr" {
+  description = "CIDR (e.g. \"YOUR_IP/32\") granted temporary access to Postgres' port 5432 from outside the VPC, to run scripts/init-db.sql once after the first apply (see README.md \"Seeding Postgres\"). Empty by default (no external access)."
+  type        = string
+  default     = ""
 }
 
 variable "database_url_secret_arn" {
   description = "ARN of the Secrets Manager secret holding the full DATABASE_URL connection string consumed by service-a/service-b (matches app.db.DATABASE_URL). Must be created out of band (e.g. `aws secretsmanager create-secret`) against an RDS endpoint provisioned separately -- out of scope for this lab module. Left unset by default so this module has no hardcoded credentials; falls back to var.database_url."
   type        = string
   default     = ""
+}
+
+variable "tempo_endpoint" {
+  description = "OTLP gRPC endpoint (host:port) for the Collector's trace exporter (otlp/tempo in otel-collector/collector-config.aws.yaml). This module does NOT deploy Tempo/Jaeger -- the default is an unresolvable placeholder: the Collector still starts and stays healthy (the OTLP exporter doesn't validate connectivity at startup, only when exporting), but trace export attempts will fail and show up as errors in the collector's CloudWatch Logs. That's expected. Point this at a real Tempo (another Fargate service, or an external one) via -var if you deploy one."
+  type        = string
+  default     = "tempo.invalid:4317"
 }
 
 variable "log_retention_days" {

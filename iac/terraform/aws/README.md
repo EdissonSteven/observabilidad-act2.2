@@ -13,6 +13,12 @@ mount a config file into.
 
 This module is **not applied** as part of the graded submission (see
 `iac/README.md` for why) — it is provided as reproducible, ready-to-run IaC.
+It also provisions Postgres itself: no RDS instance here, `postgres:16-alpine`
+runs as a third ECS Fargate service (`aws_ecs_service.postgres`), reachable
+by `service-a`/`service-b` via Cloud Map DNS (`postgres.<project_name>.local`).
+Simpler and cheaper for evaluating this module than standing up RDS; for a
+real deployment, swap it for an `aws_db_instance` and point
+`database_url`/`database_url_secret_arn` at it instead.
 
 ## Prerequisites
 
@@ -24,9 +30,12 @@ This module is **not applied** as part of the graded submission (see
    ```
 2. Terraform >= 1.5.
 3. Both services read a single `DATABASE_URL` DSN (`postgresql://user:pass@host:5432/appdb`,
-   same as `services/*/app/db.py` locally). For a real deployment, create
-   that full string as one secret and pass its ARN via
-   `database_url_secret_arn` — nothing is hardcoded here:
+   same as `services/*/app/db.py` locally). The default `database_url`
+   already points at this module's own Postgres service
+   (`postgres.observability-lab.local`) — no extra setup needed for a lab
+   run. For a real deployment against RDS instead, create the full DSN as a
+   secret and pass its ARN via `database_url_secret_arn` — nothing is
+   hardcoded here:
    ```bash
    aws secretsmanager create-secret --name observability-lab/database-url \
      --secret-string 'postgresql://app:<password>@<rds-endpoint>:5432/appdb'
@@ -73,11 +82,37 @@ Then run (or re-run) `terraform apply` so the ECS services pick up the
 pushed images (or force a new deployment: `aws ecs update-service
 --cluster <cluster> --service service-a --force-new-deployment`).
 
+## Seeding Postgres
+
+The Fargate Postgres task has no volume to auto-run `scripts/init-db.sql` on
+startup (unlike the local `docker-compose`, which mounts it into
+`/docker-entrypoint-initdb.d/`), so run it once by hand after the first
+`apply`. Set `db_admin_cidr = "<your-ip>/32"` (get it from
+`curl -s https://checkip.amazonaws.com`) via `-var` or `terraform.tfvars`
+so the Postgres security group accepts your IP, then:
+
+```bash
+TASK_ARN=$(aws ecs list-tasks --cluster $(terraform output -raw ecs_cluster_name) --service-name postgres --query 'taskArns[0]' --output text)
+ENI_ID=$(aws ecs describe-tasks --cluster $(terraform output -raw ecs_cluster_name) --tasks $TASK_ARN --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text)
+PG_IP=$(aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+
+docker run --rm -e PGPASSWORD=secret -v "$(pwd)/../../../scripts:/scripts:ro" \
+  postgres:16-alpine psql -h $PG_IP -U app -d appdb -f /scripts/init-db.sql
+```
+
 ## Verifying
 
 ```bash
 curl http://$(terraform output -raw alb_dns_name)/health
+curl http://$(terraform output -raw alb_dns_name)/orders/ord-1001
 ```
+
+Note: this module does not deploy Jaeger/Tempo/Grafana, so the Collector's
+trace exporter (`var.tempo_endpoint`, default `tempo.invalid:4317`) has
+nowhere real to send spans — export attempts will fail and show up as
+errors in the collector's CloudWatch Logs. That's expected; it doesn't
+block the app→app→DB flow or the Collector's own health. Point
+`tempo_endpoint` at a real backend if you deploy one.
 
 ## Cost and teardown warning
 

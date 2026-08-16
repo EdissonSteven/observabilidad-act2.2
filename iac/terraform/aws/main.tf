@@ -271,6 +271,53 @@ resource "aws_security_group" "service_b" {
   tags = { Name = "${var.project_name}-service-b-sg" }
 }
 
+# Postgres: no hay RDS en este módulo (ver README) -- corre como un tercer
+# servicio Fargate. Acceso desde service-a/service-b (para las apps) y,
+# opcionalmente, desde `var.db_admin_cidr` (tu IP) para poder correr
+# `scripts/init-db.sql` una sola vez después del primer `apply` -- ver el
+# sección "Seeding Postgres" del README para el comando exacto.
+resource "aws_security_group" "postgres" {
+  name        = "${var.project_name}-postgres-sg"
+  description = "Postgres: 5432 desde service-a/service-b, y opcionalmente desde db_admin_cidr"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "Postgres desde service-a"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.service_a.id]
+  }
+
+  ingress {
+    description     = "Postgres desde service-b"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.service_b.id]
+  }
+
+  dynamic "ingress" {
+    for_each = var.db_admin_cidr != "" ? [var.db_admin_cidr] : []
+    content {
+      description = "Postgres desde tu IP (seed manual de scripts/init-db.sql)"
+      from_port   = 5432
+      to_port     = 5432
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value]
+    }
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project_name}-postgres-sg" }
+}
+
 # Collector sidecars listen on 4317/4318 inside their own task's network
 # namespace only (localhost, since sidecars in the same Fargate task share a
 # network stack) — no additional SG ingress rule is required for that path.
@@ -283,7 +330,7 @@ resource "aws_security_group_rule" "service_b_otlp_from_service_a" {
   protocol                 = "tcp"
   security_group_id        = aws_security_group.service_b.id
   source_security_group_id = aws_security_group.service_a.id
-  description               = "OTLP from service-a task ENI"
+  description              = "OTLP from service-a task ENI"
 }
 
 # ---------------------------------------------------------------------------
@@ -345,7 +392,7 @@ resource "aws_ecs_task_definition" "service_a" {
   cpu                      = var.task_cpu
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn             = aws_iam_role.task.arn
+  task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -388,7 +435,10 @@ resource "aws_ecs_task_definition" "service_a" {
       essential = true
       command   = ["--config=env:OTEL_CONFIG"]
       environment = [
-        { name = "OTEL_CONFIG", value = local.otel_collector_config }
+        { name = "OTEL_CONFIG", value = local.otel_collector_config },
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "ENVIRONMENT", value = "aws-academy" },
+        { name = "TEMPO_ENDPOINT", value = var.tempo_endpoint }
       ]
       portMappings = [
         { containerPort = 4317, protocol = "tcp" },
@@ -413,7 +463,7 @@ resource "aws_ecs_task_definition" "service_b" {
   cpu                      = var.task_cpu
   memory                   = var.task_memory
   execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn             = aws_iam_role.task.arn
+  task_role_arn            = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -450,7 +500,10 @@ resource "aws_ecs_task_definition" "service_b" {
       essential = true
       command   = ["--config=env:OTEL_CONFIG"]
       environment = [
-        { name = "OTEL_CONFIG", value = local.otel_collector_config }
+        { name = "OTEL_CONFIG", value = local.otel_collector_config },
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "ENVIRONMENT", value = "aws-academy" },
+        { name = "TEMPO_ENDPOINT", value = var.tempo_endpoint }
       ]
       portMappings = [
         { containerPort = 4317, protocol = "tcp" },
@@ -495,6 +548,87 @@ resource "aws_service_discovery_service" "service_b" {
 }
 
 # ---------------------------------------------------------------------------
+# Postgres -- tercer servicio Fargate, sin RDS (ver comentario junto al SG de
+# postgres arriba). No usa el init-db.sql automáticamente al arrancar (no hay
+# volumen para montarlo en awsvpc); se corre una vez a mano contra la IP
+# pública de la task -- ver la sección "Seeding Postgres" del README.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "postgres" {
+  name              = "/ecs/${var.project_name}/postgres"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_ecs_task_definition" "postgres" {
+  family                   = "${var.project_name}-postgres"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "postgres"
+      image     = "postgres:16-alpine"
+      essential = true
+      portMappings = [
+        { containerPort = 5432, protocol = "tcp" }
+      ]
+      environment = [
+        { name = "POSTGRES_USER", value = "app" },
+        { name = "POSTGRES_PASSWORD", value = "secret" },
+        { name = "POSTGRES_DB", value = "appdb" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.postgres.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "postgres"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_service_discovery_service" "postgres" {
+  name = "postgres"
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.internal.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
+}
+
+resource "aws_ecs_service" "postgres" {
+  name            = "postgres"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.postgres.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.postgres.id]
+    assign_public_ip = true
+  }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.postgres.arn
+  }
+}
+
+# ---------------------------------------------------------------------------
 # ECS services
 # ---------------------------------------------------------------------------
 
@@ -513,8 +647,8 @@ resource "aws_ecs_service" "service_a" {
 
   load_balancer {
     target_group_arn = aws_lb_target_group.service_a.arn
-    container_name    = "service-a"
-    container_port    = 8000
+    container_name   = "service-a"
+    container_port   = 8000
   }
 
   deployment_circuit_breaker {
@@ -522,7 +656,7 @@ resource "aws_ecs_service" "service_a" {
     rollback = true
   }
 
-  depends_on = [aws_lb_listener.http]
+  depends_on = [aws_lb_listener.http, aws_ecs_service.postgres]
 }
 
 resource "aws_ecs_service" "service_b" {
@@ -546,4 +680,6 @@ resource "aws_ecs_service" "service_b" {
     enable   = true
     rollback = true
   }
+
+  depends_on = [aws_ecs_service.postgres]
 }

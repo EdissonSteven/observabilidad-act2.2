@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MD_PATH = ROOT / "docs" / "reporte-tecnico.md"
 DOCX_PATH = ROOT / "docs" / "reporte-tecnico.docx"
 SCREENSHOTS_DIR = ROOT / "docs" / "screenshots"
+CHARTS_DIR = ROOT / "docs" / "charts"
 
 CODE_FONT = "Consolas"
 BODY_FONT = "Calibri"
@@ -110,9 +111,13 @@ def add_table(doc: Document, rows: list[list[str]]) -> None:
 
 def add_image_if_referenced(doc: Document, line: str) -> bool:
     m = re.search(r"screenshots/([\w.\-]+\.png)", line)
+    base_dir = SCREENSHOTS_DIR
+    if not m:
+        m = re.search(r"charts/([\w.\-]+\.png)", line)
+        base_dir = CHARTS_DIR
     if not m:
         return False
-    img_path = SCREENSHOTS_DIR / m.group(1)
+    img_path = base_dir / m.group(1)
     if not img_path.exists():
         return False
     doc.add_picture(str(img_path), width=Cm(16))
