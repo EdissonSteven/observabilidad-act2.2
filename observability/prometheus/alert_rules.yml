@@ -16,11 +16,25 @@ groups:
     interval: 30s
     rules:
       # --- Recording rules: la señal cruda y su banda de baseline ± 2σ ---
+      # `clamp_min(..., 1e-9)` en el denominador evita una división 0/0
+      # (-> NaN) cuando no hay tráfico HTTP en la ventana de 2m. Un NaN
+      # aquí contaminaría avg_over_time/stddev_over_time del baseline
+      # de abajo durante los siguientes 30 minutos completos (cualquier
+      # NaN dentro de la ventana hace NaN el agregado entero), y una
+      # comparación `valor > NaN` siempre da false en IEEE 754 -- la
+      # alerta quedaría ciega aunque el error rate real se dispare.
+      # Confirmado empíricamente en el laboratorio (Módulo D, exp. 2,
+      # 2026-08-29): tras varios ciclos de arranque/parada de
+      # contenedores sin tráfico, `baseline_mean_30m`/`baseline_stddev_30m`
+      # quedaron en NaN mientras el error rate real ya estaba en 100%,
+      # y `CorrelatedDegradation` nunca disparó. El clamp no distorsiona
+      # ninguna lectura real (cualquier tráfico real es >>1e-9 req/s);
+      # solo evita el 0/0 exacto cuando no hay tráfico en absoluto.
       - record: service_a:http_error_rate:ratio_rate2m
         expr: |
           sum(rate(http_requests_total{job="service-a", status=~"5.."}[2m]))
           /
-          sum(rate(http_requests_total{job="service-a"}[2m]))
+          clamp_min(sum(rate(http_requests_total{job="service-a"}[2m])), 1e-9)
           * 100
 
       - record: service_a:http_error_rate:baseline_mean_30m
@@ -35,18 +49,58 @@ groups:
             sum(rate(http_request_duration_seconds_bucket{job="service-a"}[2m])) by (le)
           )
 
+      # --- Segunda señal de error rate: degradación silenciosa ------------
+      # Hallazgo real del Experimento 2 (Módulo D, 2026-08-29): cuando
+      # data-service falla (fault injection o infraestructura), service-a lo
+      # atrapa en _fetch_customer() y responde 200 igual (degradación
+      # controlada, no un error del cliente) -- así que http_requests_total
+      # NUNCA ve un 5xx para este caso, y la regla de arriba (basada solo en
+      # ese contador) es ciega a esta clase de fallo, sin importar qué tan
+      # bien calibrado esté el umbral. Se usa en cambio
+      # data_service_calls_total, que service-a ya emite con el outcome real
+      # de cada llamada (success/http_error/unreachable) independientemente
+      # del status code que termine viendo el cliente.
+      # Mismo clamp_min que en http_error_rate:ratio_rate2m de arriba y
+      # por la misma razón -- ver ese comentario para el detalle
+      # completo del hallazgo (0/0 -> NaN -> baseline envenenado 30m ->
+      # alerta ciega pese a error rate real de 100%).
+      - record: service_a:data_service_error_rate:ratio_rate2m
+        expr: |
+          sum(rate(data_service_calls_total{job="service-a", outcome!="success"}[2m]))
+          /
+          clamp_min(sum(rate(data_service_calls_total{job="service-a"}[2m])), 1e-9)
+          * 100
+
+      - record: service_a:data_service_error_rate:baseline_mean_30m
+        expr: avg_over_time(service_a:data_service_error_rate:ratio_rate2m[30m])
+
+      - record: service_a:data_service_error_rate:baseline_stddev_30m
+        expr: stddev_over_time(service_a:data_service_error_rate:ratio_rate2m[30m])
+
   - name: aiops-correlation
     rules:
       # --- Correlación (Módulo B): AMBAS señales a la vez ----------------
       # `and` entre dos vectores instantáneos sin labels adicionales (todo
       # se reduce con sum()/sin by()) -- ambos lados quedan como vectores de
       # un solo elemento sin labels, así que el match del `and` es trivial.
+      # El lado de error rate ahora es un `or` entre dos fuentes: el 5xx
+      # visto directamente por service-a, Y el error rate de data-service
+      # (que sí detecta la degradación silenciosa -- ver el comentario en
+      # la recording rule de arriba).
       - alert: CorrelatedDegradation
         expr: |
           (
-            service_a:http_error_rate:ratio_rate2m
-            >
-            (service_a:http_error_rate:baseline_mean_30m + 2 * service_a:http_error_rate:baseline_stddev_30m)
+            (
+              service_a:http_error_rate:ratio_rate2m
+              >
+              (service_a:http_error_rate:baseline_mean_30m + 2 * service_a:http_error_rate:baseline_stddev_30m)
+            )
+            or
+            (
+              service_a:data_service_error_rate:ratio_rate2m
+              >
+              (service_a:data_service_error_rate:baseline_mean_30m + 2 * service_a:data_service_error_rate:baseline_stddev_30m)
+            )
           )
           and
           (

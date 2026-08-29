@@ -88,6 +88,86 @@ resource "aws_cloudwatch_metric_alarm" "error_rate_anomaly" {
   }
 }
 
+# --- Señal 1b: degradación silenciosa de data-service (hallazgo Módulo D) -
+#
+# Hallazgo real del laboratorio integrador (Módulo D, experimento 2,
+# 2026-08-29, ver docs/reporte-ejecutivo-final.md sección 8 y el
+# comentario equivalente en observability/prometheus/alert_rules.yml,
+# donde esta misma lógica ya se validó empíricamente en local): cuando
+# data-service falla, service-a lo atrapa en _fetch_customer() y responde
+# 200 igual -- así que HTTPCode_Target_5XX_Count (la métrica del ALB que
+# usa error_rate_anomaly arriba) NUNCA lo ve. Se necesita la métrica de
+# negocio data_service_calls_total, publicada como métrica custom de
+# CloudWatch vía el exporter awsemf del Collector (ver
+# otel-collector/collector-config.aws.yaml) -- ese exporter y el permiso
+# IAM (aws_iam_role_policy.task_cloudwatch_metrics, main.tf) se añadieron
+# junto con esta alarma.
+#
+# CloudWatch no soporta un filtro "dimension != valor" en un metric_query
+# (a diferencia de outcome!="success" en PromQL) -- se suman por separado
+# los dos outcomes de fallo (http_error, unreachable) contra el total
+# agregado (publicado sin dimensión `outcome`, ver metric_declarations en
+# el Collector).
+resource "aws_cloudwatch_metric_alarm" "data_service_error_rate_anomaly" {
+  alarm_name          = "${var.project_name}-data-service-error-rate-anomaly"
+  comparison_operator = "GreaterThanUpperThreshold"
+  evaluation_periods  = 3
+  threshold_metric_id = "ad_data_service_error_rate"
+  alarm_description   = "data_service_error_rate (llamadas service-a -> data-service con outcome != success) fuera de la banda de anomalía (baseline ± 2σ). Cubre la degradación silenciosa que error_rate_anomaly no puede ver. Módulo B / hallazgo Módulo D."
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "data_service_error_rate"
+    expression  = "IF(m_ds_total > 0, ((m_ds_http_error + m_ds_unreachable) / m_ds_total) * 100, 0)"
+    label       = "data_service_error_rate_pct"
+    return_data = true
+  }
+
+  metric_query {
+    id = "m_ds_http_error"
+    metric {
+      metric_name = "data_service_calls_total"
+      namespace   = "otel-lab"
+      period      = 60
+      stat        = "Sum"
+      dimensions = {
+        outcome = "http_error"
+      }
+    }
+  }
+
+  metric_query {
+    id = "m_ds_unreachable"
+    metric {
+      metric_name = "data_service_calls_total"
+      namespace   = "otel-lab"
+      period      = 60
+      stat        = "Sum"
+      dimensions = {
+        outcome = "unreachable"
+      }
+    }
+  }
+
+  metric_query {
+    id = "m_ds_total"
+    metric {
+      metric_name = "data_service_calls_total"
+      namespace   = "otel-lab"
+      period      = 60
+      stat        = "Sum"
+      dimensions  = {} # serie agregada sin dimensión outcome, ver awsemf metric_declarations
+    }
+  }
+
+  metric_query {
+    id          = "ad_data_service_error_rate"
+    expression  = "ANOMALY_DETECTION_BAND(data_service_error_rate, 2)"
+    label       = "data_service_error_rate_pct (banda esperada, 2σ)"
+    return_data = false
+  }
+}
+
 # --- Señal 2: latency p99 vs. umbral fijo de SLO --------------------------
 
 resource "aws_cloudwatch_metric_alarm" "latency_p99_slo" {
@@ -113,9 +193,12 @@ resource "aws_cloudwatch_metric_alarm" "latency_p99_slo" {
 resource "aws_cloudwatch_composite_alarm" "correlated_degradation" {
   alarm_name        = "${var.project_name}-correlated-degradation"
   alarm_description = <<-EOT
-    Regla de correlación del Módulo B: error_rate fuera de la banda de
-    anomalía (baseline ± 2σ) Y latency_p99 por encima del SLO al mismo
-    tiempo. Diseñada para no disparar con cada blip aislado de una sola
+    Regla de correlación del Módulo B: (error_rate HTTP fuera de banda O
+    data_service_error_rate fuera de banda) Y latency_p99 por encima del
+    SLO al mismo tiempo. La rama data_service_error_rate se añadió tras
+    el hallazgo de degradación silenciosa del Módulo D -- ver el
+    comentario de aws_cloudwatch_metric_alarm.data_service_error_rate_anomaly
+    arriba. Diseñada para no disparar con cada blip aislado de una sola
     señal (eso es justamente el "ruido" que se compara contra la alarma
     estática ${aws_cloudwatch_metric_alarm.naive_static_threshold.alarm_name}
     en docs/runbooks/02-modulo-b-aiops.md).
@@ -128,7 +211,7 @@ resource "aws_cloudwatch_composite_alarm" "correlated_degradation" {
     (log group: ${aws_cloudwatch_log_group.service_a.name})
   EOT
 
-  alarm_rule = "ALARM(\"${aws_cloudwatch_metric_alarm.error_rate_anomaly.alarm_name}\") AND ALARM(\"${aws_cloudwatch_metric_alarm.latency_p99_slo.alarm_name}\")"
+  alarm_rule = "(ALARM(\"${aws_cloudwatch_metric_alarm.error_rate_anomaly.alarm_name}\") OR ALARM(\"${aws_cloudwatch_metric_alarm.data_service_error_rate_anomaly.alarm_name}\")) AND ALARM(\"${aws_cloudwatch_metric_alarm.latency_p99_slo.alarm_name}\")"
 
   alarm_actions = [aws_sns_topic.aiops_alerts.arn]
   ok_actions    = [aws_sns_topic.aiops_alerts.arn]

@@ -7,6 +7,19 @@
 # Explorer que se usa en el lado GCP (ver docs/reporte-tecnico.md).
 # Logs -> CloudWatch Logs, vía el rol IAM de la task (aws_iam_role en
 # iac/terraform/aws), sin credenciales embebidas en este archivo.
+#
+# Métricas de negocio -> CloudWatch (namespace "otel-lab") vía el exporter
+# awsemf de abajo, añadido para el hallazgo de degradación silenciosa del
+# Módulo D (ver iac/terraform/aws/cloudwatch_aiops.tf,
+# aws_cloudwatch_metric_alarm.data_service_error_rate_anomaly, y el
+# comentario equivalente en observability/prometheus/alert_rules.yml
+# donde esta misma lógica ya se validó empíricamente en local): sin esto,
+# CloudWatch solo ve el status HTTP de service-a (vía métricas del ALB),
+# nunca el outcome real de las llamadas a data-service, y por lo tanto es
+# ciego al mismo caso que error_rate_anomaly no puede detectar. Requiere
+# el permiso IAM cloudwatch:PutMetricData en el task role (ver
+# aws_iam_role_policy.task_cloudwatch_metrics en main.tf) -- no aplica
+# cuando use_academy_lab_role = true, LabRole ya trae ese permiso.
 
 extensions:
   health_check:
@@ -66,6 +79,24 @@ exporters:
     log_stream_name: otel-collector
     region: ${env:AWS_REGION}
 
+  # Solo data_service_calls_total por ahora (least-footprint, mismo
+  # espíritu que el task role "vacío por defecto" de main.tf) -- amplía
+  # metric_name_selectors si se necesita otra métrica de negocio en
+  # CloudWatch más adelante. Dos juegos de dimensiones: ["outcome"] para
+  # el desglose por resultado (success/http_error/unreachable) y [] para
+  # el total agregado -- así la alarma puede pedir cada uno por separado
+  # sin tener que sumar todas las combinaciones de dimensiones a mano.
+  awsemf:
+    region: ${env:AWS_REGION}
+    namespace: otel-lab
+    log_group_name: /otel-lab/metrics
+    log_stream_name: otel-collector
+    dimension_rollup_option: NoDimensionRollup
+    metric_declarations:
+      - dimensions: [["outcome"], []]
+        metric_name_selectors:
+          - "^data_service_calls_total$"
+
 service:
   extensions: [health_check]
 
@@ -78,7 +109,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, resource, resourcedetection, batch]
-      exporters: [prometheus]
+      exporters: [prometheus, awsemf]
 
     logs:
       receivers: [otlp]

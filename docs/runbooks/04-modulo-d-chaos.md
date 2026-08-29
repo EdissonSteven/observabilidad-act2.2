@@ -7,6 +7,57 @@ AWS Fargate, no se ejecutan. **Corre esto en UNA sola ventana de tiempo**
 -- son los pasos que más crédito/tiempo consumen; no los repitas sin
 necesidad.
 
+## Paso 0 -- Ensayo local antes de gastar presupuesto de GCP (recomendado)
+
+Antes de correr el Experimento 2 contra GCP, se ensayó completo en local
+(docker-compose), sesión del 2026-08-29 documentada en
+`docs/reporte-ejecutivo-final.md` sección 8. Encontró y corrigió dos
+problemas ANTES de tocar la nube real:
+
+1. **Falso negativo de la alerta (bug de arquitectura):** cuando
+   data-service falla, service-a lo atrapa en `_fetch_customer()` y
+   responde 200 igual -- `http_requests_total` nunca ve un 5xx para este
+   caso. Se corrigió añadiendo la señal `data_service_calls_total` a
+   `observability/prometheus/alert_rules.yml` y a las dos policies/alarmas
+   de nube (`iac/terraform/gcp/monitoring_aiops.tf`,
+   `iac/terraform/aws/cloudwatch_aiops.tf`).
+2. **Baseline envenenado por el propio experimento (metodológico, no de
+   código):** `avg_over_time`/`stddev_over_time` sobre una ventana móvil
+   (30m en Prometheus local, **1h** en la MQL de GCP) se contaminan si el
+   propio fallo inyectado ocupa una fracción grande de esa ventana --el
+   umbral "persigue" al valor real y la alerta nunca dispara, aunque el
+   error rate esté muy por encima de lo normal. Requiere dejar correr
+   tráfico limpio ANTES de inyectar el fallo, el tiempo suficiente para
+   que el baseline se asiente. Además se blindó la fórmula con
+   `clamp_min(..., 1e-9)` en el denominador para que "sin tráfico" no
+   produzca `NaN` (que también envenena el baseline, de forma más sutil
+   y persistente: un solo `NaN` dentro de la ventana hace `NaN` todo el
+   agregado, y `valor > NaN` siempre es `false`).
+
+Repetir el ensayo local (opcional pero recomendado antes de gastar
+presupuesto real):
+
+```bash
+bash chaos/run_experimento_d2.sh local
+# o con duración/warm-up explícitos:
+bash chaos/run_experimento_d2.sh local 120 300
+```
+
+El script deja correr tráfico limpio primero (default 300s), sondeando
+en vivo `error_rate`/`umbral`, y solo entonces dispara el fault -- ver
+`chaos/run_experimento_d2.sh` para el detalle completo y las referencias.
+Verifica en `http://localhost:9091/alerts` que `CorrelatedDegradation`
+pase de `inactive` a `pending` a `firing`.
+
+**Consecuencia práctica para el Experimento 2 en GCP (más abajo):** dado
+que la ventana de baseline en Cloud Monitoring es de **1 hora**, no de
+30 minutos, un warm-up de unos pocos minutos ayuda pero es proporcionalmente
+mucho más corto que en local -- si la alerta `correlated-degradation-data-service`
+no dispara en el primer intento en GCP, antes de asumir que el fix no
+sirve, confirma cuánto tráfico limpio real llevaba corriendo el clúster
+antes del fault (mientras más tiempo de operación normal previa, mejor
+calibrado el baseline).
+
 ## Experimento 1 -- latencia 200ms en service-b
 
 ```bash
@@ -23,11 +74,29 @@ python3 chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name obser
 
 ## Experimento 2 -- error rate 10% en data-service
 
+**Importante -- no dispares el fault de inmediato:** ver Paso 0 arriba
+(baseline envenenado si no hay tráfico limpio previo). Usa
+`chaos/run_experimento_d2.sh`, que ya encadena tráfico + warm-up + fault
+en el orden correcto:
+
 ```bash
-python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h5_gcp.csv &
-./chaos/h5_error_rate_data_service.sh gke 60 observability-lab
-python3 chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name observability-lab-correlated-degradation --fault-start <FAULT_START>
+./chaos/run_experimento_d2.sh gke 60 1800 observability-lab http://<endpoint>/orders/ord-1002
+# fault_s=60, warmup_s=1800 (30 min -- una fracción más razonable de la
+# ventana de 1h de Cloud Monitoring que los 5 min usados en el ensayo
+# local; ajustar según el tiempo/crédito disponible)
 ```
+
+Anota el `FAULT_START` que imprime `h5_error_rate_data_service.sh` (el
+script lo muestra en su salida) y mide el MTTD real:
+
+```bash
+python chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name <cluster_name>-correlated-degradation-data-service --fault-start <FAULT_START>
+```
+
+(Comando equivalente sin el wrapper, si se prefiere correr los pasos a
+mano: `python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h5_gcp.csv &` seguido de
+`./chaos/h5_error_rate_data_service.sh gke 60 observability-lab` -- pero
+dejando pasar el warm-up de tráfico limpio ANTES del segundo comando.)
 
 ## Preguntas a responder con datos reales (para el reporte)
 

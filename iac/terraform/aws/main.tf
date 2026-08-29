@@ -181,13 +181,39 @@ resource "aws_iam_role_policy" "execution_secrets" {
 }
 
 # Task role: least-privilege runtime permissions for the app containers.
-# Empty por defecto (fuera de Learner Lab); el OTel Collector sidecar
-# exporta por OTLP (sin llamadas a APIs de AWS) así que no se adjunta
-# política extra salvo que cambien los exporters (p. ej. awsemf/CloudWatch).
 resource "aws_iam_role" "task" {
   count              = var.use_academy_lab_role ? 0 : 1
   name               = "${var.project_name}-ecs-task"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+}
+
+# El exporter awsemf del Collector (ver
+# otel-collector/collector-config.aws.yaml, añadido para el hallazgo de
+# degradación silenciosa del Módulo D -- misma razón que
+# aws_cloudwatch_metric_alarm.data_service_error_rate_anomaly en
+# cloudwatch_aiops.tf) hace llamadas directas a la API de CloudWatch
+# (PutMetricData) desde dentro del contenedor, así que necesita este
+# permiso en el task role -- a diferencia de awscloudwatchlogs, cuyo
+# envío de logs vía el driver `awslogs` de ECS corre con el execution
+# role, no con este. No aplica bajo LabRole (ya lo trae por defecto en un
+# Learner Lab). PutMetricData no admite scoping por ARN de recurso --
+# CloudWatch Metrics no es un servicio direccionable por ARN, solo acepta
+# Resource = "*" para esta acción (documentado así en el Service
+# Authorization Reference de AWS).
+data "aws_iam_policy_document" "task_cloudwatch_metrics" {
+  count = var.use_academy_lab_role ? 0 : 1
+
+  statement {
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "task_cloudwatch_metrics" {
+  count  = var.use_academy_lab_role ? 0 : 1
+  name   = "${var.project_name}-task-cloudwatch-metrics"
+  role   = aws_iam_role.task[0].id
+  policy = data.aws_iam_policy_document.task_cloudwatch_metrics[0].json
 }
 
 locals {

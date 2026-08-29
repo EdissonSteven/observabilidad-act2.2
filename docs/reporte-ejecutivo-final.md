@@ -122,6 +122,18 @@ project ID, si `enable_app_mesh`/`deploy_rds` aplican o son N/A por ser
 variables de AWS), siguiendo `docs/runbooks/01-modulo-a-arquitectura.md` y
 `04-modulo-d-chaos.md` (sección GCP de cada uno).]
 
+**Nota metodológica:** antes de ejecutar contra GCP, los dos experimentos
+de caos (D1 y D2) se ensayaron completos en local (docker-compose),
+siguiendo el mismo estándar de "validar en seco antes de gastar
+presupuesto de nube" del Runbook 0. Ese ensayo encontró y corrigió dos
+problemas reales -- uno de arquitectura (D2) y un hallazgo no anticipado
+de rendimiento (D1) -- antes de que llegaran a costar tiempo o crédito de
+GCP. El detalle completo, con evidencia, está en las secciones 6.4 y 8;
+`docs/runbooks/04-modulo-d-chaos.md` (Paso 0) documenta cómo repetir el
+mismo ensayo, y `chaos/run_experimento_d2.sh` es el script resultante. La
+ejecución real en GCP (secciones 6.2, 6.3, 6.5, 6.6 y 9 de aquí en
+adelante) parte ya del código e IaC corregidos por este ensayo.
+
 ### 6.2 Resultados reales obtenidos
 
 [EVIDENCIA PENDIENTE: tabla de percentiles baseline vs. durante-el-fallo
@@ -136,11 +148,101 @@ GCP (`--backend gcp`) -- ¿estuvo por debajo de 2 minutos?]
 
 ### 6.4 Comparación esperado vs. obtenido
 
-[EVIDENCIA PENDIENTE: ¿se confirmaron las hipótesis D1/D2 tal cual, o
-hubo un hallazgo no anticipado -- como el de connection pooling
-descubierto en el Game Day anterior? Ese tipo de hallazgo (hipótesis
-parcialmente refutada con causa raíz identificada) es el resultado más
-valioso, no una debilidad del reporte.]
+**Evidencia de esta sección: ensayo local (docker-compose), 2026-08-29,
+previo al despliegue en GCP** (ver nota metodológica en 6.1). Se
+documenta aquí porque es el resultado real más temprano disponible sobre
+el comportamiento de las hipótesis D1/D2; la sección 6.2 recoge la
+confirmación (o divergencia) de estos mismos hallazgos una vez ejecutados
+en GCP.
+
+**D1 -- parcialmente confirmada, con hallazgo no anticipado.** La parte
+"sin que aumente la tasa de error" se confirmó: con 200ms de latencia
+inyectada (`tc netem`) en el enlace service-a → service-b, `GET
+/orders/{id}` siguió respondiendo 200 en el 100% de las peticiones
+(1680 requests, `errors_or_degraded=0`). Pero la magnitud de la latencia
+observada NO coincidió con la esperada: p99=471.4ms y max=843.3ms, es
+decir 2-4x el retraso de 200ms realmente inyectado -- no un margen de
+medición, una duplicación sistemática. Causa raíz identificada en el
+código, no inferida: `_check_inventory()` en
+`services/service-a/app/main.py` crea un `httpx.AsyncClient(timeout=5.0)`
+nuevo en CADA llamada a service-b (`async with httpx.AsyncClient(...) as
+client:` dentro de la función), sin *connection pooling* ni *keep-alive*
+entre peticiones. Bajo latencia de red inyectada, el establecimiento de
+la conexión TCP y el envío/recepción de la petición HTTP atraviesan
+ambos el enlace retrasado, pagando el costo de red dos veces por
+petición lógica en vez de una. Mismo patrón (`_fetch_customer()` hacia
+data-service) existe también para el tercer salto, aunque D1 solo inyectó
+el fallo en el segundo. **Se documenta como hallazgo, sin modificar
+código** (decisión explícita: el objetivo del experimento era validar la
+hipótesis y medir, no optimizar el pool de conexiones de httpx en este
+ciclo) -- queda como mejora identificada en
+`docs/madurez-observabilidad.md` (dominio de instrumentación/rendimiento).
+
+**D2 -- refutada en su forma original, confirmada tras corregir dos
+problemas reales.** La hipótesis esperaba que
+`CorrelatedDegradation` dispare en <2 min ante 10% de error rate
+inyectado en data-service. En el primer intento, con tráfico real
+sostenido y error rate 100% durante más de 60s seguidos, **la alerta
+nunca pasó de `inactive`.** Dos causas raíz distintas, verificadas
+empíricamente antes de tocar ningún archivo (nunca se asumió la causa sin
+evidencia, por la naturaleza de este informe):
+
+1. **Degradación silenciosa (bug de arquitectura, ya visto en el Game
+   Day de la Actividad 2.2, ahora recurrente en el salto
+   service-a→data-service):** `get_order()` solo marca `status_label`
+   distinto de "200" si una `HTTPException` sale de la función, pero
+   `_fetch_customer()` atrapa internamente TODOS sus fallos (tanto
+   `httpx.HTTPStatusError` como `httpx.RequestError`) y responde con un
+   diccionario de error, sin propagar excepción -- `get_order()` sigue
+   devolviendo 200 igual. Consecuencia: `http_requests_total` (la única
+   señal de la que dependía la regla original) nunca ve un 5xx para este
+   caso, sin importar qué tan mal calibrado esté el umbral. Confirmado
+   con `curl http://localhost:9090/metrics | grep -i data_service_calls`,
+   que sí mostraba el fallo real vía `data_service_calls_total{outcome="unreachable"}`
+   mientras `http_requests_total` se mantenía en 200 -- la señal correcta
+   ya existía, solo no estaba conectada a la alerta. **Fix:** se añadió
+   `service_a:data_service_error_rate:ratio_rate2m` (mismo patrón
+   baseline±2σ, sobre `data_service_calls_total{outcome!="success"}`) y
+   se combinó con `or` en `CorrelatedDegradation`
+   (`observability/prometheus/alert_rules.yml`), y su equivalente en
+   `iac/terraform/gcp/monitoring_aiops.tf`
+   (`correlated_degradation_data_service`, como policy independiente
+   porque el combiner de una alert policy de GCP no admite `(A or B) and
+   C` dentro de una sola policy) e
+   `iac/terraform/aws/cloudwatch_aiops.tf` (rama `OR` en el
+   `alarm_rule` de la alarma compuesta, diseño no ejecutado).
+
+2. **Baseline auto-envenenado (hallazgo metodológico, no de código):**
+   tras el fix anterior, una segunda corrida SIGUIÓ sin disparar la
+   alerta -- pero esta vez con datos reales que lo explican, no con
+   `NaN`. Se observó `error_rate` subiendo de 40% a 61.7% mientras
+   `umbral` (baseline_mean_30m + 2·stddev_30m) subía en paralelo, siempre
+   ~1.4-1.5x por encima (40→60, 53.85→76.94, 61.70→86.40): con el
+   volumen de Prometheus recién reseteado, la "historia de 30 minutos"
+   usada por `avg_over_time`/`stddev_over_time` era en realidad el propio
+   experimento en curso, así que el baseline no representaba
+   comportamiento normal -- se movía junto con la anomalía en vez de
+   servir de referencia fija. Relacionado: antes de eso, `umbral` había
+   quedado en `NaN` de forma persistente por divisiones `0/0` (sin
+   tráfico en ventanas de prueba previas), y en punto flotante IEEE 754
+   `valor > NaN` siempre es `false` -- un solo `NaN` dentro de la ventana
+   de 30 minutos deja la alerta ciega ese tiempo completo. **Fix:**
+   `clamp_min(denominador, 1e-9)` en ambas fórmulas de ratio (evita el
+   `NaN` por falta de tráfico) y, como práctica operativa, dejar correr
+   tráfico limpio (≥5 min en local, ventana de baseline de GCP es 1h así
+   que se recomienda más) ANTES de inyectar el fallo -- documentado en
+   `docs/runbooks/04-modulo-d-chaos.md` (Paso 0) y encapsulado en
+   `chaos/run_experimento_d2.sh` para que sea repetible igual cada vez.
+
+   **Confirmación empírica final** (capturas en
+   `docs/evidencia/d2_correlateddegradation_*.png`): con el baseline ya
+   asentado en 0/0 durante 5 minutos de warm-up limpio, al inyectar el
+   fallo `CorrelatedDegradation` pasó de `inactive` a **`PENDING`**
+   (`Active Since: 2026-08-29T04:43:33.325497069Z`, `Value:
+   17.41`) y, sostenido más de 60s (el `for: 1m` de la regla), a
+   **`FIRING`** (mismo `Active Since`, `Value: 100`) --
+   `docs/evidencia/d2_correlateddegradation_pending_detalle.png` y
+   `d2_correlateddegradation_firing_detalle.png`.
 
 ### 6.5 ¿Se degradó el SLO? ¿Se consumió el error budget?
 
@@ -174,10 +276,54 @@ razonamiento completo y la remediación propuesta.
 
 ## 8. Debilidad sistémica revelada y remediación
 
-[EVIDENCIA PENDIENTE: síntesis de 6.4 -- ¿qué reveló realmente el
-experimento sobre el sistema? Seguir el mismo estándar de
-`GameDay_Plan.pdf` sección 6: una debilidad concreta y accionable, no una
-lista genérica de buenas prácticas.]
+**Debilidad:** el sistema tiene un patrón recurrente de **degradación
+silenciosa invisible a las métricas basadas en status HTTP**. No es un
+bug aislado de `data-service` -- es la MISMA clase de fallo que ya se
+había encontrado en el Game Day de la Actividad 2.2 (service-a →
+service-b), y en este laboratorio integrador volvió a aparecer de forma
+idéntica un salto más adelante (service-a → data-service), pese a que
+`data-service` es un servicio nuevo escrito después de conocer el
+problema. Eso indica que la causa no es "un desarrollador se olvidó de
+algo" sino un patrón estructural: **cualquier código que atrape una
+excepción de una llamada saliente y siga respondiendo 200 al llamador
+esconde ese fallo de toda métrica que dependa del status code de la
+respuesta final**, sin importar cuántas veces se repita el ejercicio de
+chaos engineering si la métrica de instrumentación no cambia.
+
+**Por qué importa más allá de este caso puntual:** un operador que solo
+mira dashboards de `http_requests_total`/tasa de 5xx durante un incidente
+real vería el sistema "sano" (200 en todos lados) mientras una
+dependencia interna falla activamente -- exactamente el escenario que un
+sistema de AIOps con correlación baseline±2σ está pensado para prevenir,
+y que en la primera implementación de este laboratorio NO prevenía,
+porque la señal correcta (`data_service_calls_total` con el outcome real)
+ya existía en el código pero nunca se conectó a la alerta.
+
+**Remediación aplicada (no solo propuesta -- ya implementada y validada
+empíricamente en local, ver sección 6.4):**
+
+1. Wiring de la señal correcta a la alerta de correlación en las 3
+   implementaciones (Prometheus local, GCP MQL, AWS metric math/alarma
+   compuesta), en vez de solo documentar el hallazgo.
+2. Endurecimiento de la fórmula del baseline (`clamp_min`) contra `NaN`
+   por falta de tráfico -- un problema que, sin el ensayo local previo,
+   muy probablemente se hubiera descubierto recién durante la ejecución
+   real en GCP, con presupuesto y tiempo de Learner Lab/crédito ya
+   gastados.
+3. Procedimiento operativo documentado (warm-up antes de inyectar
+   fallos) para que el mismo error de metodología no se repita al
+   ejecutar en GCP ni en una futura ejecución de este mismo laboratorio.
+
+**Remediación propuesta, no aplicada en este ciclo** (queda en
+`docs/madurez-observabilidad.md` como mejora priorizada): una convención
+de instrumentación explícita para el equipo -- toda función que capture
+una excepción de una dependencia saliente y decida "degradar
+controladamente" (responder con datos parciales en vez de propagar el
+error) debe emitir una métrica de negocio dedicada al outcome real de esa
+llamada (como ya hace `data_service_calls_total`), y esa métrica debe
+declararse obligatoria en la checklist de code review para cualquier
+integración nueva -- no depender de que cada nuevo servicio repita el
+mismo hallazgo por separado.
 
 ## 9. Reporte de madurez de observabilidad (Módulo E)
 

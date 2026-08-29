@@ -362,6 +362,19 @@ resource "kubernetes_deployment" "service_b" {
             }
           }
 
+          # Módulo D, experimento 1, modo "tc": sin esta capability, `tc
+          # netem` dentro del pod falla con "Operation not permitted" aunque
+          # la imagen ya tenga iproute2 instalado (ver
+          # services/service-b/Dockerfile). Equivalente en GKE del `cap_add:
+          # [NET_ADMIN]` que docker-compose usa para el mismo experimento en
+          # local -- Kubernetes no lee `cap_add` de Compose, necesita este
+          # bloque explícito.
+          security_context {
+            capabilities {
+              add = ["NET_ADMIN"]
+            }
+          }
+
           resources {
             requests = {
               cpu    = "100m"

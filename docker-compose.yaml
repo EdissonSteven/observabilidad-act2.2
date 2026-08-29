@@ -197,6 +197,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       otel-collector: { condition: service_started }
+    cap_add: [NET_ADMIN]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 10s
