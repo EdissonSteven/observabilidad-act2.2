@@ -5,8 +5,21 @@ repository, least-privilege IAM for the node pool, and the Kubernetes
 workloads (`service-a`, `service-b`, `otel-collector`) via the `kubernetes`
 Terraform provider pointed at the cluster it just created.
 
-This module is **not applied** as part of the graded submission (see
-`iac/README.md` for why) — it is provided as reproducible, ready-to-run IaC.
+This module is **not applied** as part of the Actividad 2.2 submission
+(see `iac/README.md` for why) — it is provided as reproducible,
+ready-to-run IaC.
+
+> **Módulos A-E (laboratorio integrador):** este módulo también incluye
+> `cloudsql.tf` (Cloud SQL para `data-service`), `data_service.tf`
+> (Deployment/Service K8s del tercer microservicio),
+> `monitoring_aiops.tf` (alertas de correlación), `network_security.tf`
+> (Flow Logs + dashboard de seguridad), y la instalación de Istio
+> (`iac/istio/`). **Este módulo GCP sí se despliega de verdad** en esa
+> entrega -- el paso a paso real (build/push de las 3 imágenes, orden de
+> apply, instalación de Istio, evidencia a capturar) está en
+> `docs/runbooks/01-modulo-a-arquitectura.md` (sección GCP) y los
+> runbooks `02`-`05`, no en las secciones de abajo (que documentan solo
+> la versión base de dos servicios).
 
 ## Prerequisites
 

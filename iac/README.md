@@ -1,5 +1,19 @@
 # Infrastructure as Code
 
+> **Nota (laboratorio integrador, Módulos A-E):** este directorio se
+> extendió más allá de lo descrito abajo -- ahora también provisiona el
+> tercer microservicio `data-service`, Cloud SQL/RDS, service mesh
+> (Istio/App Mesh), alertas de AIOps, VPC Flow Logs y un dashboard de
+> seguridad (ver `cloudsql.tf`, `data_service.tf`/`data_service_ecs.tf`,
+> `monitoring_aiops.tf`/`cloudwatch_aiops.tf`, `network_security.tf`/
+> `vpc_flow_logs.tf`, `security_dashboard.tf`, `appmesh.tf` en cada
+> módulo). El paso a paso real para desplegar y validar esas piezas está
+> en `docs/runbooks/00-validacion-local-y-preflight.md` en adelante, no en
+> los README de este directorio (que documentan la versión base de
+> Actividad 2.2). **Decisión de alcance:** el despliegue real de esa
+> entrega es solo en GCP -- el módulo AWS queda escrito y validado
+> sintácticamente, no desplegado (ver `docs/reporte-ejecutivo-final.md`).
+
 This directory holds the IaC for deploying the observability lab's two
 FastAPI services (`service-a`, `service-b`) and the OTel Collector to real
 cloud infrastructure, as the dual-cloud complement to the docker-compose

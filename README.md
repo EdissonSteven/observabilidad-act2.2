@@ -1,12 +1,35 @@
 # Pipeline de Observabilidad End-to-End con OpenTelemetry
 
-Actividad 2.2 — dos microservicios FastAPI (`service-a` → `service-b`)
-instrumentados con OpenTelemetry SDK (trazas, métricas, logs), un OTel
-Collector, y backends Jaeger/Tempo (trazas), Prometheus (métricas) y Loki
-(logs), correlacionados en Grafana vía `trace_id`.
+Este repo cubre dos entregas sobre la misma base de código:
 
-El reporte técnico completo (arquitectura, decisiones de diseño, resultados
-reales del benchmark) está en [`docs/reporte-tecnico.md`](docs/reporte-tecnico.md).
+1. **Actividad 2.2** (base): dos microservicios FastAPI (`service-a` →
+   `service-b`) instrumentados con OpenTelemetry SDK (trazas, métricas,
+   logs), un OTel Collector, y backends Jaeger/Tempo (trazas), Prometheus
+   (métricas) y Loki (logs), correlacionados en Grafana vía `trace_id`.
+   Reporte técnico completo en
+   [`docs/reporte-tecnico.md`](docs/reporte-tecnico.md).
+2. **Laboratorio integrador (Módulos A-E)** (extensión): añade un tercer
+   microservicio `data-service` con base de datos gestionada (Cloud
+   SQL/RDS) y OTel DB Semantic Conventions, service mesh (Istio/App Mesh),
+   AIOps con alertas de correlación, Network & Security Observability,
+   2 experimentos de Chaos Engineering con medición de MTTD, y un
+   framework de madurez de observabilidad de 8 dominios.
+   **El punto de entrada de esta segunda entrega es
+   [`docs/runbooks/00-validacion-local-y-preflight.md`](docs/runbooks/00-validacion-local-y-preflight.md)**
+   -- de ahí en adelante los runbooks `01`-`05` cubren, en orden, la
+   validación local con el tercer servicio, el despliegue real en la nube
+   y su validación, y el cierre/destroy. El reporte ejecutivo de esta
+   entrega es [`docs/reporte-ejecutivo-final.md`](docs/reporte-ejecutivo-final.md)
+   y el framework de madurez [`docs/madurez-observabilidad.md`](docs/madurez-observabilidad.md).
+   **Decisión de alcance:** el despliegue real de esta entrega se hace
+   solo en **GCP**; el Terraform de AWS es diseño completo y validado
+   sintácticamente pero no se despliega (ver la nota al inicio de
+   `docs/reporte-ejecutivo-final.md`).
+
+El resto de este README documenta el Quickstart local de la Actividad
+2.2 base (`service-a`/`service-b`, sin `data-service`) -- sigue siendo
+válido tal cual, y es el primer paso del Runbook 0 de la segunda entrega
+antes de sumar el tercer servicio.
 
 ## Quickstart
 
@@ -91,16 +114,22 @@ comparativa completa en `docs/reporte-tecnico.md` sección 6.2.
 > `C:/Program Files/Git/scripts/...`, es MSYS reescribiendo el argumento;
 > anteponer `MSYS_NO_PATHCONV=1` al comando.
 
-## Despliegue en la nube (no ejecutado en esta entrega)
+## Despliegue en la nube
 
-`iac/terraform/gcp/` (GKE) e `iac/terraform/aws/` (ECS Fargate) contienen
-Terraform completo y listo para `terraform apply`, y `iac/helm/otel-collector/`
-un Helm chart propio del Collector. **Deliberadamente no se desplegó** contra
-una cuenta de nube real (evita costos y credenciales en la entrega) — el
-stack local documentado arriba es la fuente de toda la evidencia de este
-laboratorio. Ver `docs/reporte-tecnico.md` sección 7 y el README de cada
-módulo (`iac/README.md`, `iac/terraform/gcp/README.md`,
-`iac/terraform/aws/README.md`) para los pasos exactos si se quiere desplegar.
+Para la **Actividad 2.2** (solo `service-a`/`service-b`), el IaC de
+`iac/terraform/gcp/` (GKE) e `iac/terraform/aws/` (ECS Fargate), más
+`iac/helm/otel-collector/`, se dejó **deliberadamente no desplegado** —
+el stack local documentado arriba fue toda la evidencia de esa entrega.
+
+Para el **laboratorio integrador (Módulos A-E)**, ambos módulos Terraform
+se extendieron con el tercer servicio, bases de datos gestionadas,
+service mesh, AIOps, Flow Logs y dashboards de seguridad -- pero el
+despliegue real solo se ejecuta en **GCP** (ver la decisión de alcance
+arriba); AWS se queda en el mismo estado "escrito y validado, no
+desplegado" que ya describía la Actividad 2.2. Los pasos exactos están en
+`docs/runbooks/00-validacion-local-y-preflight.md` en adelante, no en los
+README de cada módulo de Terraform (que documentan la versión base de
+Actividad 2.2 y quedan como referencia de esa infraestructura mínima).
 
 ## Generar el reporte técnico (Word / PDF)
 
@@ -152,24 +181,38 @@ done
 ## Estructura del repositorio
 
 ```
-services/service-a/, services/service-b/   Código de instrumentación OTel SDK (FastAPI)
+services/service-a/, service-b/, data-service/   Código OTel SDK (FastAPI) -- data-service es del laboratorio integrador
 otel-collector/                             Config del Collector: local (docker-compose) + gcp + aws
-observability/                              Prometheus, Tempo, Loki, Grafana (datasources + dashboard)
-scripts/init-db.sql                         Esquema y datos de prueba de PostgreSQL
-benchmark/                                  k6-load-test.js, analyze_overhead.py, results/ (datos reales)
-iac/terraform/{gcp,aws}/                    Terraform: GKE y ECS Fargate (no ejecutado, ver arriba)
+observability/                              Prometheus (+ alert_rules.yml), Tempo, Loki, Grafana
+scripts/init-db.sql                         Esquema y datos de prueba de PostgreSQL (incluye customers)
+scripts/{aws,gcp}_preflight_check.sh        Preflight de permisos de solo lectura (laboratorio integrador)
+benchmark/                                  k6-load-test.js, analyze_overhead.py, results/ (Actividad 2.2)
+chaos/                                       Scripts de chaos engineering + medición de MTTD (Módulo D)
+iac/terraform/{gcp,aws}/                    Terraform: GKE/Cloud SQL/Istio/AIOps/Flow Logs (gcp, desplegado)
+                                             y ECS Fargate/RDS/App Mesh/AIOps/Flow Logs (aws, diseño no desplegado)
+iac/istio/                                  Manifiestos de Istio (mTLS, destination rules) para GKE
 iac/helm/otel-collector/                    Helm chart del Collector para GKE
-docs/reporte-tecnico.md                     Reporte técnico completo (fuente del PDF)
-docker-compose.yaml                         Stack local completo
+docs/reporte-tecnico.md                     Reporte técnico de Actividad 2.2 (fuente del PDF)
+docs/reporte-ejecutivo-final.md             Reporte ejecutivo del laboratorio integrador (Módulos A-E)
+docs/madurez-observabilidad.md              Framework de madurez de 8 dominios + roadmap (Módulo E)
+docs/video-demo-script.md                   Guion/checklist para el video de demostración
+docs/runbooks/00-05                         Paso a paso: validación local, despliegue GCP, chaos, cierre
+docker-compose.yaml                         Stack local completo (incluye data-service)
 docker-compose.baseline.yml                 Overlay: desactiva el SDK de OTel para el benchmark
 ```
 
-## Checklist de entregables (según la rúbrica de la actividad)
+## Checklist de entregables
 
+**Actividad 2.2 (base):**
 - [x] Instrumentación OTel SDK: auto + custom, 3 pilares emitidos y verificados
 - [x] OTel Collector: configurado y corriendo (local); config gcp/aws lista sin desplegar
 - [x] Correlación cross-signal: trace_id verificado entre trazas, logs y (vía Resource) métricas
 - [x] Benchmark de overhead: baseline real vs. OTel SDK, tabla en el reporte
 - [x] IaC: Terraform GCP + AWS, Helm chart, repositorio organizado
 - [x] Capturas de pantalla (`docs/screenshots/`)
-- [x] Reporte técnico generado en Word (`docs/reporte-tecnico.docx`) — falta solo guardarlo como PDF (ver arriba)
+- [x] Reporte técnico generado en Word (`docs/reporte-tecnico.docx`)
+
+**Laboratorio integrador, Módulos A-E:** ver el checklist de estado real
+(código listo vs. evidencia pendiente de ejecución) en
+`docs/reporte-ejecutivo-final.md` y `docs/madurez-observabilidad.md` --
+no se duplica aquí para no tener dos fuentes de verdad desincronizadas.

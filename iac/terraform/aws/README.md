@@ -11,8 +11,22 @@ injected into each sidecar as an `OTEL_CONFIG` environment variable
 (`--config=env:OTEL_CONFIG`) since Fargate `awsvpc` tasks have no volume to
 mount a config file into.
 
-This module is **not applied** as part of the graded submission (see
-`iac/README.md` for why) — it is provided as reproducible, ready-to-run IaC.
+This module is **not applied** as part of the Actividad 2.2 submission
+(see `iac/README.md` for why) — it is provided as reproducible,
+ready-to-run IaC.
+
+> **Módulos A-E (laboratorio integrador):** este módulo también incluye
+> `rds.tf` (RDS PostgreSQL para `data-service`), `data_service_ecs.tf`
+> (tercer servicio ECS), `appmesh.tf` (App Mesh + sidecar Envoy),
+> `cloudwatch_aiops.tf` (alertas de correlación), `vpc_flow_logs.tf` y
+> `security_dashboard.tf`, más el soporte de `LabRole` fijo de AWS
+> Academy (`use_academy_lab_role`). **A diferencia del módulo GCP, este
+> NO se despliega** en esa entrega -- decisión explícita de alcance para
+> no arriesgar el presupuesto del Learner Lab (ver
+> `docs/reporte-ejecutivo-final.md`). Todo el código de abajo sigue
+> siendo válido y `terraform plan`-eable; simplemente no se ejecutó
+> `apply` con estos recursos nuevos.
+
 It also provisions Postgres itself: no RDS instance here, `postgres:16-alpine`
 runs as a third ECS Fargate service (`aws_ecs_service.postgres`), reachable
 by `service-a`/`service-b` via Cloud Map DNS (`postgres.<project_name>.local`).
