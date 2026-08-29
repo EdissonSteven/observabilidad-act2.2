@@ -33,3 +33,18 @@ output "get_credentials_command" {
   description = "gcloud command to fetch kubeconfig for this cluster."
   value       = "gcloud container clusters get-credentials ${google_container_cluster.primary.name} --region ${var.region} --project ${var.project_id}"
 }
+
+output "cloudsql_customers_private_ip" {
+  description = "IP privada de la instancia Cloud SQL de data-service."
+  value       = google_sql_database_instance.customers.private_ip_address
+}
+
+output "cloudsql_customers_secret_id" {
+  description = "ID del secreto en Secret Manager con el DATABASE_URL completo de data-service."
+  value       = google_secret_manager_secret.customers_database_url.secret_id
+}
+
+output "denied_traffic_log_metric" {
+  description = "Nombre del log-based metric de tráfico rechazado (Módulo C)."
+  value       = google_logging_metric.denied_traffic.name
+}

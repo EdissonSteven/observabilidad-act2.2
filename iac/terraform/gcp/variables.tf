@@ -111,3 +111,59 @@ variable "database_url" {
   default     = "postgresql://app:secret@postgres.observability-lab.svc.cluster.local:5432/appdb"
   sensitive   = true
 }
+
+# ---------------------------------------------------------------------------
+# data-service / Cloud SQL (Módulo A) -- ver cloudsql.tf y data_service.tf
+# ---------------------------------------------------------------------------
+
+variable "cloudsql_tier" {
+  description = "Tier de la instancia Cloud SQL de data-service. db-f1-micro es la más pequeña compartida -- de laboratorio, no de producción."
+  type        = string
+  default     = "db-f1-micro"
+}
+
+variable "cloudsql_database_version" {
+  description = "Versión de motor de Cloud SQL."
+  type        = string
+  default     = "POSTGRES_16"
+}
+
+variable "data_service_replicas" {
+  description = "Replica count para el Deployment de data-service."
+  type        = number
+  default     = 1
+}
+
+variable "fault_inject_error_rate" {
+  description = "Módulo D, experimento 2 (error rate en data-service): probabilidad (0-1, como string) de fallo inyectado a propósito. \"0\" en reposo -- ver chaos/h5_error_rate_data_service.sh."
+  type        = string
+  default     = "0"
+}
+
+variable "inject_latency_ms" {
+  description = "Módulo D, experimento 1 (latencia en service-b), modo \"env\" alternativo a tc netem. \"0\" en reposo -- ver chaos/h4_latency_service_b.sh."
+  type        = string
+  default     = "0"
+}
+
+# ---------------------------------------------------------------------------
+# AIOps (Módulo B) y Network/Security (Módulo C)
+# ---------------------------------------------------------------------------
+
+variable "latency_p99_slo_ms" {
+  description = "Umbral de SLO de latencia p99 (milisegundos) para GET /orders/{id}. Mismo valor de referencia que el lado AWS (ver iac/terraform/aws/variables.tf) para poder comparar ambas nubes en el reporte."
+  type        = number
+  default     = 300
+}
+
+variable "alert_notification_email" {
+  description = "Email suscrito a las alertas de Cloud Monitoring (Módulo B). Vacío por defecto."
+  type        = string
+  default     = ""
+}
+
+variable "denied_traffic_alert_threshold" {
+  description = "Umbral (conexiones/segundo, tras ALIGN_RATE) de tráfico rechazado por firewall para disparar la alerta de Módulo C. Ajustar tras observar el nivel de ruido de fondo real del clúster (ver docs/runbooks/03-modulo-c-network-security.md)."
+  type        = number
+  default     = 5
+}

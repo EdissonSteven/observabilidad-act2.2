@@ -1,0 +1,145 @@
+# ---------------------------------------------------------------------------
+# Network & Security Observability (Módulo C).
+#
+# VPC Flow Logs ya está habilitado en la subred (ver el bloque log_config
+# en main.tf) -- eso captura TODO el tráfico permitido. Para ver tráfico
+# RECHAZADO ("tráfico anómalo entre servicios") hace falta además Firewall
+# Rule Logging, que es un mecanismo distinto en GCP: se habilita por regla
+# de firewall, no por subred. Esta VPC (creada con auto_create_subnetworks
+# = false en main.tf) no trae ninguna regla de firewall implícita más allá
+# de las que GKE gestiona automáticamente para el propio clúster -- así que
+# se añade aquí una regla explícita de deny-all de prioridad baja (65534,
+# por debajo de cualquier regla más específica que GKE u otros módulos
+# creen) con logging activado: no bloquea nada que ya estuviera permitido,
+# solo genera la señal de "intento rechazado" para el dashboard de
+# seguridad.
+#
+# Security Command Center: NO se incluye como recurso de Terraform aquí a
+# propósito. SCC (Standard o Premium) se activa a nivel de ORGANIZACIÓN de
+# GCP (Cloud Identity/Workspace), no de proyecto -- una cuenta de prueba
+# gratuita individual (como la de este laboratorio, creada con correo
+# institucional pero sin una organización de GCP detrás) normalmente NO
+# tiene un recurso de organización al que engancharse, y
+# `google_scc_*` fallaría con "no organization found" al aplicar. Se deja
+# documentado como intento a verificar en el preflight
+# (scripts/gcp_preflight_check.sh corre `gcloud organizations list`) y,
+# si no hay organización disponible, como brecha explícita en
+# docs/madurez-observabilidad.md (dominio 5) con el log-based metric de
+# abajo como sustituto funcional dentro del alcance de este laboratorio.
+# ---------------------------------------------------------------------------
+
+resource "google_compute_firewall" "deny_all_logged" {
+  name      = "${var.network_name}-deny-all-logged"
+  network   = google_compute_network.vpc.id
+  priority  = 65534
+  direction = "INGRESS"
+
+  deny {
+    protocol = "all"
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
+resource "google_logging_metric" "denied_traffic" {
+  project     = var.project_id
+  name        = "${var.cluster_name}-denied-connections"
+  description = "Conteo de conexiones rechazadas por firewall (Módulo C: golden signal de tráfico anómalo N-S/E-W)."
+  filter      = "resource.type=\"gce_subnetwork\" jsonPayload.disposition=\"DENIED\""
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_monitoring_alert_policy" "anomalous_denied_traffic" {
+  project      = var.project_id
+  display_name = "${var.cluster_name}-anomalous-denied-traffic"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "pico de conexiones rechazadas"
+    condition_threshold {
+      filter          = "resource.type=\"gce_subnetwork\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.denied_traffic.name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.denied_traffic_alert_threshold
+      duration        = "60s"
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_RATE"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_email != "" ? [google_monitoring_notification_channel.aiops_email[0].id] : []
+
+  depends_on = [google_project_service.monitoring]
+}
+
+# --- Dashboard "Golden Signals de Seguridad" -------------------------------
+# Mismo alcance honesto que el lado AWS (ver
+# iac/terraform/aws/security_dashboard.tf): ni service-a, ni service-b, ni
+# data-service implementan autenticación de usuario final, así que
+# "intentos de autenticación fallidos" no tiene una señal real en ESTE
+# sistema. El dashboard adapta el concepto a lo que sí se observa: tráfico
+# rechazado (arriba), conexiones a Cloud SQL, y saturación de CPU/memoria
+# de los pods como proxy de escaneos/DoS de bajo volumen.
+resource "google_monitoring_dashboard" "security_golden_signals" {
+  project        = var.project_id
+  dashboard_json = jsonencode({
+    displayName = "${var.cluster_name} - Golden Signals de Seguridad"
+    mosaicLayout = {
+      columns = 12
+      tiles = [
+        {
+          width = 12, height = 2,
+          widget = {
+            text = {
+              content = "Ni service-a, ni service-b, ni data-service implementan autenticación de usuario final -- ver docs/madurez-observabilidad.md (dominio 5) para la brecha documentada y su remediación. Paneles abajo: tráfico rechazado por firewall, conexiones activas a Cloud SQL, y saturación de cómputo como proxies de actividad anómala.",
+              format  = "MARKDOWN"
+            }
+          }
+        },
+        {
+          width = 6, height = 4, yPos = 2,
+          widget = {
+            title = "Conexiones rechazadas por firewall (deny-all-logged)"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "resource.type=\"gce_subnetwork\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.denied_traffic.name}\""
+                    aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_RATE" }
+                  }
+                }
+              }]
+            }
+          }
+        },
+        {
+          width = 6, height = 4, xPos = 6, yPos = 2,
+          widget = {
+            title = "Cloud SQL (customers) - conexiones activas"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter      = "resource.type=\"cloudsql_database\" AND resource.labels.database_id=\"${var.project_id}:${var.cluster_name}-customers\" AND metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\""
+                    aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_MEAN" }
+                  }
+                }
+              }]
+            }
+          }
+        }
+      ]
+    }
+  })
+}

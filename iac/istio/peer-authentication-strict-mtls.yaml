@@ -1,0 +1,14 @@
+# mTLS estricto entre los 3 microservicios del laboratorio integrador
+# (Módulo A: observabilidad de red L7 vía service mesh). Con STRICT, Envoy
+# rechaza cualquier conexión en texto plano dentro del namespace -- todo el
+# tráfico service-a -> service-b -> data-service queda cifrado y autenticado
+# por certificados rotados automáticamente por istiod, sin cambiar una
+# línea de código de las apps.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: observability-lab
+spec:
+  mtls:
+    mode: STRICT

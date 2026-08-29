@@ -25,6 +25,22 @@ from app.telemetry import logger, meter, tracer
 PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "9091"))
 APP_VERSION = telemetry.VERSION
 
+# Módulo D, experimento 1 (latencia en service-b): fallback de fault
+# injection a nivel de aplicación. El método PREFERIDO sigue siendo
+# `tc netem` a nivel de red (el mismo usado en el Game Day de la Actividad
+# 2.2 -- ver chaos/h4_latency_service_b.sh, modo "tc") porque inyecta el
+# fallo por fuera del proceso, sin tocar código de negocio. Pero `tc netem`
+# necesita la capability NET_ADMIN dentro del contenedor, que:
+#   - SÍ se puede otorgar en Docker Compose (docker-compose.override.yml)
+#     y en un Pod de GKE (securityContext.capabilities.add).
+#   - NO se puede otorgar en AWS ECS Fargate (NET_ADMIN no está en la lista
+#     de capabilities que Fargate permite añadir a un contenedor).
+# INJECT_LATENCY_MS es entonces el modo "env" del mismo script de chaos,
+# usado cuando el objetivo es Fargate -- mismo espíritu que
+# FAULT_INJECT_ERROR_RATE en data-service: variable de entorno explícita,
+# auditable, en 0 fuera de la ventana del experimento.
+INJECT_LATENCY_MS = int(os.getenv("INJECT_LATENCY_MS", "0"))
+
 inventory_requests_total = meter.create_counter(
     "inventory_requests_total",
     description="Consultas de inventario procesadas, por resultado",
@@ -68,6 +84,17 @@ async def health():
 
 @app.get("/inventory/{sku}")
 async def get_stock(sku: str):
+    if INJECT_LATENCY_MS > 0:
+        with tracer.start_as_current_span(
+            "inventory.chaos_latency_injected",
+            attributes={"chaos.injected": True, "chaos.latency_ms": INJECT_LATENCY_MS},
+        ):
+            logger.warning(
+                "inventory_chaos_latency_injected",
+                extra={"sku": sku, "injected_ms": INJECT_LATENCY_MS},
+            )
+            time.sleep(INJECT_LATENCY_MS / 1000.0)
+
     if sku in _stock_cache:
         with tracer.start_as_current_span(
             "inventory.cache_lookup", attributes={"sku": sku, "cache.hit": True}

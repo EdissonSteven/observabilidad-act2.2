@@ -1,0 +1,78 @@
+# Reglas de alerta locales (Módulo B: AIOps y correlación).
+#
+# Implementa la MISMA regla que iac/terraform/aws/cloudwatch_aiops.tf y
+# iac/terraform/gcp/monitoring_aiops.tf, pero cloud-agnóstica y verificable
+# 100% localmente con `docker compose` -- esto es lo que de verdad se puede
+# probar antes de gastar presupuesto de nube (ver el plan de ejecución en
+# docs/runbooks/02-modulo-b-aiops.md), y sirve de referencia para confirmar
+# que la fórmula ("baseline + 2σ" calculado explícitamente, no una caja
+# negra) da resultados sensatos antes de traducirla a MQL/CloudWatch.
+#
+# Prometheus expone las alertas actualmente en "firing" en
+# /api/v1/alerts SIN necesitar Alertmanager -- chaos/measure_mttd.py
+# (backend "local") consulta ese endpoint directamente.
+groups:
+  - name: error-rate-baseline
+    interval: 30s
+    rules:
+      # --- Recording rules: la señal cruda y su banda de baseline ± 2σ ---
+      - record: service_a:http_error_rate:ratio_rate2m
+        expr: |
+          sum(rate(http_requests_total{job="service-a", status=~"5.."}[2m]))
+          /
+          sum(rate(http_requests_total{job="service-a"}[2m]))
+          * 100
+
+      - record: service_a:http_error_rate:baseline_mean_30m
+        expr: avg_over_time(service_a:http_error_rate:ratio_rate2m[30m])
+
+      - record: service_a:http_error_rate:baseline_stddev_30m
+        expr: stddev_over_time(service_a:http_error_rate:ratio_rate2m[30m])
+
+      - record: service_a:http_latency_p99:2m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{job="service-a"}[2m])) by (le)
+          )
+
+  - name: aiops-correlation
+    rules:
+      # --- Correlación (Módulo B): AMBAS señales a la vez ----------------
+      # `and` entre dos vectores instantáneos sin labels adicionales (todo
+      # se reduce con sum()/sin by()) -- ambos lados quedan como vectores de
+      # un solo elemento sin labels, así que el match del `and` es trivial.
+      - alert: CorrelatedDegradation
+        expr: |
+          (
+            service_a:http_error_rate:ratio_rate2m
+            >
+            (service_a:http_error_rate:baseline_mean_30m + 2 * service_a:http_error_rate:baseline_stddev_30m)
+          )
+          and
+          (
+            service_a:http_latency_p99:2m > 0.3
+          )
+        for: 1m
+        labels:
+          severity: critical
+          module: aiops-correlation
+        annotations:
+          summary: "error_rate fuera de baseline ± 2σ Y latency_p99 > SLO (300ms) al mismo tiempo"
+          description: >-
+            Ver trace_id de las peticiones fallidas en Grafana Explore
+            (Loki) con: {service_name="service-a"} | json | level="ERROR"
+            -- cada línea trae su trace_id para saltar directo a Jaeger.
+
+      # --- Baseline de comparación: umbral estático ingenuo --------------
+      # A propósito ruidoso -- dispara con CUALQUIER 5xx, sin correlacionar
+      # con latencia ni con el comportamiento histórico. Usado solo para
+      # contar falsos positivos contra CorrelatedDegradation sobre el mismo
+      # tráfico real (ver docs/runbooks/02-modulo-b-aiops.md).
+      - alert: NaiveStatic5xx
+        expr: sum(rate(http_requests_total{job="service-a", status=~"5.."}[1m])) > 0
+        for: 0s
+        labels:
+          severity: warning
+          module: aiops-naive-baseline
+        annotations:
+          summary: "Al menos un 5xx en el último minuto (umbral estático, sin correlación)"

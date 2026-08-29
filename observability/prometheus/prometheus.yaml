@@ -4,6 +4,15 @@ global:
   external_labels:
     lab: otel-observabilidad
 
+# Módulo B (AIOps y correlación) -- ver alert_rules.yml. Sin Alertmanager
+# configurado en este stack local, las alertas quedan visibles vía
+# GET http://localhost:9091/api/v1/alerts (lo que consulta
+# chaos/measure_mttd.py --backend local) y en la pestaña Alerts de la UI
+# de Prometheus -- suficiente para medir MTTD localmente sin añadir un
+# contenedor más al stack.
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
 scrape_configs:
   # Métricas de negocio de los servicios, re-exportadas por el Collector
   # (prometheus exporter) con resource_to_telemetry_conversion habilitado.
@@ -27,3 +36,7 @@ scrape_configs:
   - job_name: service-b
     static_configs:
       - targets: ["service-b:9091"]
+
+  - job_name: data-service
+    static_configs:
+      - targets: ["data-service:9093"]

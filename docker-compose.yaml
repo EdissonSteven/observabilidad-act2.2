@@ -6,6 +6,7 @@
 # Accesos:
 #   service-a          http://localhost:8000/docs
 #   service-b          http://localhost:8001/docs
+#   data-service       http://localhost:8002/docs   (Módulo A: 3er microservicio)
 #   Jaeger UI          http://localhost:16686
 #   Grafana            http://localhost:3001  (admin/admin)
 #   Prometheus         http://localhost:9091
@@ -103,6 +104,7 @@ services:
       - "--web.enable-remote-write-receiver"
     volumes:
       - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./observability/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9091:9090"
@@ -129,6 +131,7 @@ services:
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       SERVICE_B_URL: http://service-b:8001
+      DATA_SERVICE_URL: http://data-service:8002
       DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
       PROMETHEUS_PORT: "9090"
       ENVIRONMENT: local
@@ -140,8 +143,38 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       otel-collector: { condition: service_started }
+      data-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # data-service: tercer microservicio del laboratorio integrador (Módulo A).
+  # En despliegue real apunta a Cloud SQL / RDS (ver iac/terraform/{gcp,aws});
+  # localmente usa el mismo Postgres del stack (base compartida, ver
+  # scripts/init-db.sql) para poder validar el trace de 3 saltos sin costo.
+  data-service:
+    build: ./services/data-service
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      PROMETHEUS_PORT: "9093"
+      ENVIRONMENT: local
+      CLOUD_PROVIDER: local
+      # Módulo D, experimento 2 (error rate 10%): en reposo queda en "0"
+      # (desactivado). El runbook de chaos/h5_error_rate_data_service.sh lo
+      # sube a 0.10 solo durante la ventana cronometrada del experimento.
+      FAULT_INJECT_ERROR_RATE: "0"
+    ports:
+      - "8002:8002"
+      - "9094:9093"
+    networks: [otel-net]
+    depends_on:
+      postgres: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -154,6 +187,9 @@ services:
       PROMETHEUS_PORT: "9091"
       ENVIRONMENT: local
       CLOUD_PROVIDER: local
+      # Módulo D, experimento 1 (fallback sin tc netem -- ver el comentario
+      # en services/service-b/app/main.py). "0" en reposo.
+      INJECT_LATENCY_MS: "0"
     ports:
       - "8001:8001"
       - "9092:9091"

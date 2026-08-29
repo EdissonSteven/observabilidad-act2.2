@@ -26,6 +26,17 @@ resource "google_compute_subnetwork" "subnet" {
   }
 
   private_ip_google_access = true
+
+  # VPC Flow Logs (Módulo C). A diferencia de AWS (ver
+  # iac/terraform/aws/vpc_flow_logs.tf), en GCP esto no necesita ningún rol
+  # IAM nuevo -- es un simple flag en la subred, y los logs van directo a
+  # Cloud Logging donde SÍ se pueden convertir en métricas consultables en
+  # vivo (ver monitoring_aiops.tf y security_dashboard.tf).
+  log_config {
+    aggregation_interval = "INTERVAL_1_MIN"
+    flow_sampling        = 1.0 # 100% de las conexiones -- lab de corta duración, no producción a escala
+    metadata             = "INCLUDE_ALL_METADATA"
+  }
 }
 
 resource "google_compute_router" "router" {
@@ -234,6 +245,11 @@ resource "kubernetes_deployment" "service_a" {
           }
 
           env {
+            name  = "DATA_SERVICE_URL"
+            value = "http://data-service.${var.kubernetes_namespace}.svc.cluster.local:8002"
+          }
+
+          env {
             name = "DATABASE_URL"
             value_from {
               secret_key_ref {
@@ -325,6 +341,15 @@ resource "kubernetes_deployment" "service_b" {
           env {
             name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
             value = "http://otel-collector.${var.kubernetes_namespace}.svc.cluster.local:4317"
+          }
+
+          # Módulo D, experimento 1: modo "tc" (con securityContext.capabilities
+          # NET_ADMIN, ver iac/istio/README.md y chaos/h4_latency_service_b.sh)
+          # es el preferido en GKE; este env var queda como modo alternativo
+          # "env" para mantener paridad exacta con el lado AWS Fargate.
+          env {
+            name  = "INJECT_LATENCY_MS"
+            value = var.inject_latency_ms
           }
 
           env {

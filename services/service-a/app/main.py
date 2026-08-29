@@ -6,7 +6,11 @@ Flujo del endpoint principal (GET /orders/{order_id}):
      `order.check_inventory`, que envuelve la llamada HTTP -- httpx ya
      viene auto-instrumentado, así que el header `traceparent` W3C se
      propaga sin código adicional).
-  3. Devuelve la respuesta combinada, incluyendo el trace_id para que el
+  3. Llama a data-service (Módulo A del laboratorio integrador) para
+     resolver el perfil del cliente dueño del pedido (span custom
+     `order.fetch_customer`) -- tercer salto de la traza distribuida,
+     mismo mecanismo de propagación W3C automático vía httpx.
+  4. Devuelve la respuesta combinada, incluyendo el trace_id para que el
      benchmark k6 y la demo puedan pegarlo directo en Jaeger/Grafana.
 """
 from __future__ import annotations
@@ -28,6 +32,7 @@ from app.telemetry import logger, meter, tracer
 
 PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "9090"))
 SERVICE_B_URL = os.getenv("SERVICE_B_URL", "http://localhost:8001")
+DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://localhost:8002")
 APP_VERSION = telemetry.VERSION
 
 http_requests_total = meter.create_counter(
@@ -46,6 +51,10 @@ http_requests_in_flight = meter.create_up_down_counter(
 service_b_calls_total = meter.create_counter(
     "service_b_calls_total",
     description="Llamadas salientes a service-b, por resultado",
+)
+data_service_calls_total = meter.create_counter(
+    "data_service_calls_total",
+    description="Llamadas salientes a data-service, por resultado (incluye chaos_injected del Módulo D)",
 )
 
 
@@ -81,11 +90,13 @@ async def get_order(order_id: str):
     try:
         order = _fetch_order(order_id)
         inventory = await _check_inventory(order["sku"])
+        customer = await _fetch_customer(order["customer_id"])
 
         status_label = "200"
         return {
             "order": order,
             "inventory": inventory,
+            "customer": customer,
             "trace_id": format(trace.get_current_span().get_span_context().trace_id, "032x"),
         }
     except HTTPException as exc:
@@ -108,7 +119,7 @@ def _fetch_order(order_id: str) -> dict:
             conn = get_connection()
             with conn, conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, sku, quantity, status FROM orders WHERE id = %s",
+                    "SELECT id, sku, customer_id, quantity, status FROM orders WHERE id = %s",
                     (order_id,),
                 )
                 row = cur.fetchone()
@@ -164,3 +175,48 @@ async def _check_inventory(sku: str) -> dict:
             service_b_calls_total.add(1, {"outcome": "unreachable"})
             logger.error("inventory_check_unreachable", extra={"sku": sku, "error": str(exc)})
             return {"available_units": None, "error": "service-b no disponible"}
+
+
+async def _fetch_customer(customer_id: str) -> dict:
+    """Tercer salto de la traza: service-a -> data-service.
+
+    Nota deliberada para el Módulo D (experimento de error-rate en
+    data-service): desde el punto de vista de service-a, un fallo
+    inyectado por chaos (`chaos.injected=true` en el span de data-service)
+    y un fallo real de infraestructura son indistinguibles -- ambos llegan
+    aquí como un 500 genérico de httpx. Esa es precisamente la razón por la
+    que el Módulo D exige revisar la traza/log de data-service (donde sí
+    queda marcado `chaos.injected`) y no solo el status code visto por el
+    consumidor, igual que la lección de observabilidad ya documentada en
+    el Game Day de la Actividad 2.2 (degradación silenciosa entre
+    service-a y service-b).
+    """
+    with tracer.start_as_current_span(
+        "order.fetch_customer",
+        kind=trace.SpanKind.CLIENT,
+        attributes={"peer.service": "data-service", "customer.id": customer_id},
+    ) as span:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{DATA_SERVICE_URL}/customers/{customer_id}")
+                resp.raise_for_status()
+                customer = resp.json()
+
+            span.set_attribute("http.status_code", resp.status_code)
+            span.set_attribute("customer.tier", customer.get("tier", "unknown"))
+            data_service_calls_total.add(1, {"outcome": "success"})
+            logger.info("customer_resolved", extra={"customer_id": customer_id, "tier": customer.get("tier")})
+            return customer
+
+        except httpx.HTTPStatusError as exc:
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            data_service_calls_total.add(1, {"outcome": "http_error"})
+            logger.error("customer_resolve_failed", extra={"customer_id": customer_id, "error": str(exc)})
+            return {"full_name": None, "error": "data-service respondió con error"}
+
+        except httpx.RequestError as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, "data-service unreachable"))
+            data_service_calls_total.add(1, {"outcome": "unreachable"})
+            logger.error("customer_resolve_unreachable", extra={"customer_id": customer_id, "error": str(exc)})
+            return {"full_name": None, "error": "data-service no disponible"}

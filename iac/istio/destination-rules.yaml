@@ -1,0 +1,25 @@
+# DestinationRule explícita (ISTIO_MUTUAL) para cada backend interno --
+# redundante con el PeerAuthentication STRICT del namespace, pero explícita
+# a propósito: documenta la intención por servicio y es lo que
+# `istioctl analyze` espera ver cuando se audita mTLS servicio por servicio.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: service-b-mtls
+  namespace: observability-lab
+spec:
+  host: service-b.observability-lab.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: data-service-mtls
+  namespace: observability-lab
+spec:
+  host: data-service.observability-lab.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL

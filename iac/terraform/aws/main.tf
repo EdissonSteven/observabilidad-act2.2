@@ -137,21 +137,35 @@ data "aws_iam_policy_document" "ecs_assume_role" {
   }
 }
 
+# Ver la sección "AWS Academy / Vocareum Learner Lab compatibility" en
+# variables.tf: con use_academy_lab_role = true (default) se reutiliza este
+# rol en vez de crear aws_iam_role propios, que fallarían con AccessDenied
+# en un Learner Lab.
+data "aws_iam_role" "lab_role" {
+  count = var.use_academy_lab_role ? 1 : 0
+  name  = var.academy_lab_role_name
+}
+
 # Execution role: pulls images from ECR and ships logs to CloudWatch.
 resource "aws_iam_role" "execution" {
+  count              = var.use_academy_lab_role ? 0 : 1
   name               = "${var.project_name}-ecs-execution"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
 }
 
 resource "aws_iam_role_policy_attachment" "execution_managed" {
-  role       = aws_iam_role.execution.name
+  count      = var.use_academy_lab_role ? 0 : 1
+  role       = aws_iam_role.execution[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 # Allow the execution role to read the DATABASE_URL secret for injection as
-# a task-definition `secrets` entry (only granted when a secret ARN is set).
+# a task-definition `secrets` entry (only granted when a secret ARN is set
+# AND we're managing our own role -- LabRole ya trae permisos amplios de
+# Secrets Manager por defecto en un Learner Lab, así que este bloque no
+# aplica cuando use_academy_lab_role = true).
 data "aws_iam_policy_document" "execution_secrets" {
-  count = var.database_url_secret_arn != "" ? 1 : 0
+  count = (!var.use_academy_lab_role && var.database_url_secret_arn != "") ? 1 : 0
 
   statement {
     actions   = ["secretsmanager:GetSecretValue"]
@@ -160,18 +174,27 @@ data "aws_iam_policy_document" "execution_secrets" {
 }
 
 resource "aws_iam_role_policy" "execution_secrets" {
-  count  = var.database_url_secret_arn != "" ? 1 : 0
+  count  = (!var.use_academy_lab_role && var.database_url_secret_arn != "") ? 1 : 0
   name   = "${var.project_name}-execution-secrets"
-  role   = aws_iam_role.execution.id
+  role   = aws_iam_role.execution[0].id
   policy = data.aws_iam_policy_document.execution_secrets[0].json
 }
 
 # Task role: least-privilege runtime permissions for the app containers.
-# Empty by default; the OTel Collector sidecar exports over OTLP (no AWS API
-# calls needed) so no extra policy is attached unless exporters change.
+# Empty por defecto (fuera de Learner Lab); el OTel Collector sidecar
+# exporta por OTLP (sin llamadas a APIs de AWS) así que no se adjunta
+# política extra salvo que cambien los exporters (p. ej. awsemf/CloudWatch).
 resource "aws_iam_role" "task" {
+  count              = var.use_academy_lab_role ? 0 : 1
   name               = "${var.project_name}-ecs-task"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+}
+
+locals {
+  # Único punto de verdad para los ARNs de rol usados por TODAS las task
+  # definitions de este módulo (service-a, service-b, postgres, data-service).
+  execution_role_arn = var.use_academy_lab_role ? data.aws_iam_role.lab_role[0].arn : aws_iam_role.execution[0].arn
+  task_role_arn      = var.use_academy_lab_role ? data.aws_iam_role.lab_role[0].arn : aws_iam_role.task[0].arn
 }
 
 # ---------------------------------------------------------------------------
@@ -391,10 +414,27 @@ resource "aws_ecs_task_definition" "service_a" {
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
   memory                   = var.task_memory
-  execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  execution_role_arn       = local.execution_role_arn
+  task_role_arn            = local.task_role_arn
 
-  container_definitions = jsonencode([
+  # App Mesh (Módulo A): ver appmesh.tf. Sin efecto (bloque vacío) si
+  # enable_app_mesh = false.
+  dynamic "proxy_configuration" {
+    for_each = var.enable_app_mesh ? [1] : []
+    content {
+      type           = "APPMESH"
+      container_name = "envoy"
+      properties = {
+        AppPorts         = "8000"
+        EgressIgnoredIPs = "169.254.170.2,169.254.169.254"
+        IgnoredUID       = "1337"
+        ProxyEgressPort  = "15001"
+        ProxyIngressPort = "15000"
+      }
+    }
+  }
+
+  container_definitions = jsonencode(concat([
     {
       name      = "service-a"
       image     = "${aws_ecr_repository.service_a.repository_url}:${var.image_tag}"
@@ -406,6 +446,7 @@ resource "aws_ecs_task_definition" "service_a" {
         [
           { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
           { name = "SERVICE_B_URL", value = "http://service-b.${var.project_name}.local:8001" },
+          { name = "DATA_SERVICE_URL", value = "http://data-service.${var.project_name}.local:8002" },
         ],
         # DATABASE_URL viaja como env var plana solo si no hay secret ARN
         # (fallback dev/demo); en un despliegue real siempre debe venir de
@@ -453,7 +494,7 @@ resource "aws_ecs_task_definition" "service_a" {
         }
       }
     }
-  ])
+  ], var.enable_app_mesh ? [local.envoy_container["service-a"]] : []))
 }
 
 resource "aws_ecs_task_definition" "service_b" {
@@ -462,10 +503,25 @@ resource "aws_ecs_task_definition" "service_b" {
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
   memory                   = var.task_memory
-  execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  execution_role_arn       = local.execution_role_arn
+  task_role_arn            = local.task_role_arn
 
-  container_definitions = jsonencode([
+  dynamic "proxy_configuration" {
+    for_each = var.enable_app_mesh ? [1] : []
+    content {
+      type           = "APPMESH"
+      container_name = "envoy"
+      properties = {
+        AppPorts         = "8001"
+        EgressIgnoredIPs = "169.254.170.2,169.254.169.254"
+        IgnoredUID       = "1337"
+        ProxyEgressPort  = "15001"
+        ProxyIngressPort = "15000"
+      }
+    }
+  }
+
+  container_definitions = jsonencode(concat([
     {
       name      = "service-b"
       image     = "${aws_ecr_repository.service_b.repository_url}:${var.image_tag}"
@@ -474,7 +530,10 @@ resource "aws_ecs_task_definition" "service_b" {
         { containerPort = 8001, protocol = "tcp" }
       ]
       environment = concat(
-        [{ name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" }],
+        [
+          { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
+          { name = "INJECT_LATENCY_MS", value = var.inject_latency_ms },
+        ],
         var.database_url_secret_arn == "" ? [
           { name = "DATABASE_URL", value = var.database_url }
         ] : []
@@ -518,7 +577,7 @@ resource "aws_ecs_task_definition" "service_b" {
         }
       }
     }
-  ])
+  ], var.enable_app_mesh ? [local.envoy_container["service-b"]] : []))
 }
 
 # ---------------------------------------------------------------------------
@@ -565,8 +624,8 @@ resource "aws_ecs_task_definition" "postgres" {
   network_mode             = "awsvpc"
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  execution_role_arn       = local.execution_role_arn
+  task_role_arn            = local.task_role_arn
 
   container_definitions = jsonencode([
     {
@@ -656,7 +715,7 @@ resource "aws_ecs_service" "service_a" {
     rollback = true
   }
 
-  depends_on = [aws_lb_listener.http, aws_ecs_service.postgres]
+  depends_on = [aws_lb_listener.http, aws_ecs_service.postgres, aws_ecs_service.data_service]
 }
 
 resource "aws_ecs_service" "service_b" {
