@@ -58,6 +58,20 @@ resource "google_logging_metric" "denied_traffic" {
   }
 }
 
+# Hallazgo real del primer apply (2026-08-29): aunque google_logging_metric
+# .denied_traffic se creó bien en el mismo apply ("Creation complete after
+# 6s"), la policy de abajo falló con "Cannot find metric(s) that match
+# type = logging.googleapis.com/user/... If a metric was created recently,
+# it could take up to 10 minutes to become available" -- un log-based
+# metric recién creado tarda en indexarse como métrica consultable por
+# Cloud Monitoring, y Terraform no espera eso por defecto (no hay señal de
+# "listo" que la API exponga). Se fuerza una espera explícita en vez de
+# depender de que el usuario reintente el apply a mano.
+resource "time_sleep" "wait_for_denied_traffic_metric" {
+  depends_on      = [google_logging_metric.denied_traffic]
+  create_duration = "150s"
+}
+
 resource "google_monitoring_alert_policy" "anomalous_denied_traffic" {
   project      = var.project_id
   display_name = "${var.cluster_name}-anomalous-denied-traffic"
@@ -80,7 +94,12 @@ resource "google_monitoring_alert_policy" "anomalous_denied_traffic" {
 
   notification_channels = var.alert_notification_email != "" ? [google_monitoring_notification_channel.aiops_email[0].id] : []
 
-  depends_on = [google_project_service.monitoring]
+  # 150s suele bastar, pero Google documenta hasta 10 minutos de
+  # propagación -- si este recurso vuelve a fallar con el mismo error,
+  # simplemente reintenta `terraform apply` unos minutos después: el
+  # log-based metric y el resto del stack ya están creados (idempotente),
+  # solo falta que esta única policy quede registrada.
+  depends_on = [google_project_service.monitoring, time_sleep.wait_for_denied_traffic_metric]
 }
 
 # --- Dashboard "Golden Signals de Seguridad" -------------------------------

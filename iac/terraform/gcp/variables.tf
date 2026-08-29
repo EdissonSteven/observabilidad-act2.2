@@ -167,3 +167,35 @@ variable "denied_traffic_alert_threshold" {
   type        = number
   default     = 5
 }
+
+variable "deploy_aiops_correlation_alerts" {
+  description = <<-EOT
+    Si es false (default), NO crea las 3 alert policies de
+    monitoring_aiops.tf que dependen de métricas de APLICACIÓN
+    (correlated_degradation, correlated_degradation_data_service,
+    naive_static_threshold) -- a diferencia de anomalous_denied_traffic
+    (network_security.tf), que depende de un log-based metric que el
+    propio Terraform crea.
+
+    Hallazgo real del primer apply contra un proyecto/clúster recién
+    creado (2026-08-29): Google Managed Prometheus solo registra el
+    descriptor de una métrica ('prometheus.googleapis.com/.../counter')
+    tras ingerir el primer dato real -- sin GKE desplegado ni tráfico de
+    las apps corriendo todavía, esas 3 policies fallan con "Could not
+    find a metric named ...".
+
+    Poner en true SOLO después de, en este orden: (1) este mismo apply
+    con el flag en false (default), (2) desplegar los 3 microservicios +
+    collector (Runbook 1) y generar tráfico real, (3) confirmar en Cloud
+    Console -> Monitoring -> Metrics Explorer (modo MQL) que las 3
+    métricas usadas ya aparecen con datos, y (4) validar ahí mismo la
+    sintaxis MQL exacta de las 2 policies de correlación -- ver la
+    ADVERTENCIA DE VALIDACIÓN al inicio de monitoring_aiops.tf, son
+    consultas MQL escritas sin acceso a una consola real y DEBEN
+    confirmarse contra datos reales antes de depender de ellas. Recién
+    entonces: terraform apply -var deploy_aiops_correlation_alerts=true.
+    Ver docs/runbooks/02-modulo-b-aiops.md, Paso 1.
+  EOT
+  type        = bool
+  default     = false
+}

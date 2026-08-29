@@ -109,7 +109,18 @@ gcloud config set project <tu-project-id>
 ```
 
 Confirma sobre todo: facturación habilitada (los \$300 de crédito
-vinculados) y si hay una organización (Security Command Center).
+vinculados), si hay una organización (Security Command Center), y
+**Cloud Resource Manager API habilitada** -- a diferencia de las demás
+APIs (que Terraform habilita solo en el `apply`), esta es la única que
+el preflight marca como `[FAIL]` bloqueante, porque en un proyecto
+recién creado que nunca la usó, Terraform no puede habilitarla por sí
+mismo (hallazgo real del primer `apply` de este laboratorio, 2026-08-29
+-- ver `iac/terraform/gcp/apis.tf`). Si el preflight la marca `[FAIL]`:
+
+```bash
+gcloud services enable cloudresourcemanager.googleapis.com --project=<tu-project-id>
+# espera 1-2 minutos a que propague, luego vuelve a correr el preflight
+```
 
 ## Paso 6 -- `terraform plan` en seco, sin aplicar nada todavía
 

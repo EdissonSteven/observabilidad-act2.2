@@ -7,6 +7,8 @@ data "google_client_config" "default" {}
 resource "google_compute_network" "vpc" {
   name                    = var.network_name
   auto_create_subnetworks = false
+
+  depends_on = [google_project_service.compute]
 }
 
 resource "google_compute_subnetwork" "subnet" {
@@ -63,6 +65,8 @@ resource "google_artifact_registry_repository" "images" {
   repository_id = var.artifact_registry_repo_id
   description   = "Container images for service-a / service-b (observability lab)"
   format        = "DOCKER"
+
+  depends_on = [google_project_service.artifactregistry]
 }
 
 # ---------------------------------------------------------------------------
@@ -72,6 +76,8 @@ resource "google_artifact_registry_repository" "images" {
 resource "google_service_account" "gke_nodes" {
   account_id   = "${var.cluster_name}-nodes"
   display_name = "GKE node service account (${var.cluster_name})"
+
+  depends_on = [google_project_service.iam]
 }
 
 resource "google_project_iam_member" "gke_nodes_logging" {
@@ -140,6 +146,8 @@ resource "google_container_cluster" "primary" {
   # Provider v5 defaults this to true, which blocks `terraform destroy`.
   # Explicitly false since this is a disposable lab cluster (see README).
   deletion_protection = false
+
+  depends_on = [google_project_service.container]
 }
 
 resource "google_container_node_pool" "primary_nodes" {

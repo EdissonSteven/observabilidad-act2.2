@@ -41,12 +41,30 @@ else
 fi
 
 echo ""
+echo "== Cloud Resource Manager API (bootstrap obligatorio, bloqueante) =="
+# Hallazgo real del primer terraform apply contra un proyecto recién creado
+# (2026-08-29, observabilidad-lab-507021): TODOS los recursos
+# google_project_service (incluido el que intentaría habilitar esta misma
+# API) fallaron con "Cloud Resource Manager API has not been used in
+# project ... or it is disabled" -- Terraform usa por debajo el Service
+# Usage API para gestionar el estado de otras APIs, y ese a su vez depende
+# de Cloud Resource Manager para validar el proyecto. Es un problema de
+# arranque que Terraform NO puede resolverse a sí mismo (a diferencia de
+# las demás APIs de la sección de abajo, que sí se auto-habilitan en el
+# apply) -- por eso esto sí es un [FAIL] bloqueante, no un [WARN].
+if gcloud services list --enabled --project "$PROJECT_ID" --filter="config.name=cloudresourcemanager.googleapis.com" --format="value(config.name)" 2>/dev/null | grep -q "cloudresourcemanager.googleapis.com"; then
+  ok "cloudresourcemanager.googleapis.com ya habilitada"
+else
+  bad "cloudresourcemanager.googleapis.com NO habilitada -- ningún 'terraform apply' funcionará (todas las google_project_service fallarán) hasta correr: gcloud services enable cloudresourcemanager.googleapis.com --project=$PROJECT_ID"
+fi
+
+echo ""
 echo "== APIs necesarias (se habilitan solas vía google_project_service en el apply, esto solo informa el estado actual) =="
-for api in container.googleapis.com sqladmin.googleapis.com servicenetworking.googleapis.com monitoring.googleapis.com logging.googleapis.com secretmanager.googleapis.com; do
+for api in container.googleapis.com compute.googleapis.com artifactregistry.googleapis.com iam.googleapis.com sqladmin.googleapis.com servicenetworking.googleapis.com monitoring.googleapis.com logging.googleapis.com secretmanager.googleapis.com; do
   if gcloud services list --enabled --project "$PROJECT_ID" --filter="config.name=$api" --format="value(config.name)" 2>/dev/null | grep -q "$api"; then
     ok "$api ya habilitada"
   else
-    warn "$api NO habilitada todavía -- el 'apply' la habilita automáticamente (google_project_service), primer apply puede tardar unos minutos extra por esto"
+    warn "$api NO habilitada todavía -- el 'apply' la habilita automáticamente (google_project_service, ver iac/terraform/gcp/apis.tf), primer apply puede tardar unos minutos extra por esto"
   fi
 done
 

@@ -23,12 +23,14 @@ resource "google_project_service" "sqladmin" {
   project            = var.project_id
   service            = "sqladmin.googleapis.com"
   disable_on_destroy = false
+  depends_on         = [google_project_service.cloudresourcemanager]
 }
 
 resource "google_project_service" "servicenetworking" {
   project            = var.project_id
   service            = "servicenetworking.googleapis.com"
   disable_on_destroy = false
+  depends_on         = [google_project_service.cloudresourcemanager]
 }
 
 resource "google_compute_global_address" "private_ip_range" {
@@ -103,6 +105,7 @@ resource "google_project_service" "secretmanager" {
   project            = var.project_id
   service            = "secretmanager.googleapis.com"
   disable_on_destroy = false
+  depends_on         = [google_project_service.cloudresourcemanager]
 }
 
 resource "google_secret_manager_secret" "customers_database_url" {

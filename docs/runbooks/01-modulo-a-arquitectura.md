@@ -49,6 +49,17 @@ cd iac/terraform/gcp
 terraform apply -var project_id=<tu-project-id>
 # Este apply es más largo (GKE + Cloud SQL + peering privado pueden tardar
 # 10-15 min la primera vez) -- normal, no lo interrumpas.
+#
+# Nota: este apply NO crea las 3 alert policies de AIOps que dependen de
+# métricas de aplicación (correlated_degradation,
+# correlated_degradation_data_service, naive_static_threshold) -- quedan
+# gateadas detrás de var.deploy_aiops_correlation_alerts (default false)
+# porque esas métricas todavía no existen en Cloud Monitoring antes de que
+# las apps de abajo generen tráfico real. Se aplican en una segunda pasada
+# al final de este runbook (Runbook 2, Paso 1-2), después de validar la
+# consulta MQL contra datos reales. Ver iac/terraform/gcp/apis.tf y
+# monitoring_aiops.tf para el resto de hallazgos del primer apply real
+# (APIs base sin habilitar, límite de 1 condition por policy MQL).
 
 $(terraform output -raw get_credentials_command)
 

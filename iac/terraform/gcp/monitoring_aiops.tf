@@ -33,12 +33,54 @@
 # Ver docs/runbooks/02-modulo-b-aiops.md paso 1. Si la sintaxis no
 # corre tal cual, ajústala ahí mismo con el autocompletado de la consola
 # -- es más confiable que adivinar MQL sin poder ejecutarlo.
+#
+# DOS HALLAZGOS ADICIONALES, del primer terraform apply real contra
+# observabilidad-lab-507021 (2026-08-29), que cambiaron la estructura de
+# este archivo respecto al borrador original:
+#
+# 1) "Alert policies with 'monitoring_query_language' condition type can
+#    only have a single condition" (Error 400 real de la API). Confirmado
+#    también en la documentación oficial: "If you use MQL in a condition,
+#    then that condition must be the only condition in the policy."
+#    (https://docs.cloud.google.com/monitoring/mql/alerts) -- a diferencia
+#    de condition_threshold, que sí admite varias conditions combinadas
+#    con combiner. Las dos conditions originales (error_rate y
+#    latency_p99) de cada policy de correlación se reescribieron como UNA
+#    sola consulta MQL que hace fetch de ambas métricas por separado con
+#    la sintaxis oficial de fan-out `{ metric A ; metric B } | join`
+#    (ejemplo confirmado en
+#    https://cloud.google.com/monitoring/mql/reference: `fetch gce_instance
+#    | { metric .../cpu/utilization ; metric .../cpu/reserved_cores } |
+#    join | div`) y evalúa el AND al final, sobre las dos ramas ya unidas.
+#    La combinación de mean_prev_by/stddev_prev_by DENTRO de una rama y el
+#    AND booleano DESPUÉS del join (`val(0).<campo> && val(1).<campo>`) es
+#    una extensión razonable de ese patrón oficial, pero -- igual que el
+#    resto del archivo -- NO se pudo probar contra una consola real todavía
+#    (la doc oficial no trae un ejemplo con funciones de ventana móvil tras
+#    un join). Confírmalo en Metrics Explorer antes de depender de esto.
+#
+# 2) "Could not find a metric named 'prometheus.googleapis.com/
+#    http_requests_total/counter'" (Error 400 real de la API, en
+#    naive_static_threshold, que solo tiene 1 condition y por eso sí llegó
+#    a validarse contra el nombre de la métrica). Causa: Google Managed
+#    Prometheus recién registra el descriptor de una métrica cuando llega
+#    el primer dato real -- en un proyecto/clúster recién creado, sin GKE
+#    desplegado ni tráfico de las apps, la métrica simplemente no existe
+#    todavía. Las 3 policies de este archivo (las 2 de correlación +
+#    naive_static_threshold) ahora se gatean con
+#    var.deploy_aiops_correlation_alerts (default false, ver variables.tf)
+#    para no bloquear el resto del stack (GKE, Cloud SQL, IAM, etc., que sí
+#    se pueden crear sin esto) -- se aplican en una SEGUNDA pasada de
+#    `terraform apply -var deploy_aiops_correlation_alerts=true`, después
+#    de desplegar las apps y generar tráfico real (Runbook 1 + Runbook 2
+#    Paso 1).
 # ---------------------------------------------------------------------------
 
 resource "google_project_service" "monitoring" {
   project            = var.project_id
   service            = "monitoring.googleapis.com"
   disable_on_destroy = false
+  depends_on         = [google_project_service.cloudresourcemanager]
 }
 
 resource "google_monitoring_notification_channel" "aiops_email" {
@@ -58,45 +100,41 @@ resource "google_monitoring_notification_channel" "aiops_email" {
 # (esto ES la banda "baseline + 2σ" calculada explícitamente, no una caja
 # negra). latency_p99 usa el histograma OTel ya expuesto por el Collector.
 resource "google_monitoring_alert_policy" "correlated_degradation" {
+  count        = var.deploy_aiops_correlation_alerts ? 1 : 0
   project      = var.project_id
   display_name = "${var.cluster_name}-correlated-degradation"
-  combiner     = "AND" # ambas condiciones deben cumplirse -- es la "correlación" del Módulo B
+  combiner     = "OR" # una sola condition -- el AND real ya está DENTRO de la consulta MQL, ver comentario de cabecera
 
+  # Una sola condition MQL que hace fetch de las dos métricas por separado
+  # (fan-out { ; } | join, sintaxis oficial -- ver comentario de cabecera)
+  # y evalúa error_rate fuera de baseline+2σ Y latency_p99 > SLO al mismo
+  # tiempo, DESPUÉS de unir ambas ramas. Antes eran 2 conditions
+  # independientes con combiner AND -- la API de GCP no lo permite para
+  # condition_monitoring_query_language (Error 400 real, ver cabecera).
   conditions {
-    display_name = "error_rate fuera de baseline + 2 sigma"
+    display_name = "error_rate fuera de baseline + 2 sigma Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
     condition_monitoring_query_language {
       query    = <<-MQL
         fetch prometheus_target
-        | metric 'prometheus.googleapis.com/http_requests_total/counter'
-        | filter (resource.namespace == '${var.kubernetes_namespace}')
-        | align rate(1m)
-        | group_by [metric.status], [val: sum(value.http_requests_total)]
-        | { ident
-          | filter metric.status == '500' | group_by [], [error: sum(val)]
-          ; ident
-          | group_by [], [total: sum(val)] }
+        | { metric 'prometheus.googleapis.com/http_requests_total/counter'
+            | filter (resource.namespace == '${var.kubernetes_namespace}')
+            | align rate(1m)
+            | group_by [metric.status], [val: sum(value.http_requests_total)]
+            | { ident
+              | filter metric.status == '500' | group_by [], [error: sum(val)]
+              ; ident
+              | group_by [], [total: sum(val)] }
+            | join
+            | value [error_rate: val(0).error / val(1).total * 100]
+            | value [error_anomaly: error_rate > mean_prev_by(1h) + 2 * stddev_prev_by(1h)]
+          ; metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
+            | filter (resource.namespace == '${var.kubernetes_namespace}')
+            | align delta(1m)
+            | every 1m
+            | group_by [], [p99: percentile(value.http_request_duration_seconds, 99)]
+            | value [latency_high: p99 > ${var.latency_p99_slo_ms / 1000.0}] }
         | join
-        | value [ratio: val(0).error / val(1).total * 100]
-        | condition ratio > mean_prev_by(1h) + 2 * stddev_prev_by(1h)
-      MQL
-      duration = "180s"
-      trigger {
-        count = 1
-      }
-    }
-  }
-
-  conditions {
-    display_name = "latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
-    condition_monitoring_query_language {
-      query    = <<-MQL
-        fetch prometheus_target
-        | metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
-        | filter (resource.namespace == '${var.kubernetes_namespace}')
-        | align delta(1m)
-        | every 1m
-        | group_by [], [val: percentile(value.http_request_duration_seconds, 99)]
-        | condition val > ${var.latency_p99_slo_ms / 1000.0} '1'
+        | condition val(0).error_anomaly && val(1).latency_high '1'
       MQL
       duration = "180s"
       trigger {
@@ -156,45 +194,38 @@ resource "google_monitoring_alert_policy" "correlated_degradation" {
 # operacionalmente igual al `or` entre las dos recording rules que usa
 # Prometheus en alert_rules.yml.
 resource "google_monitoring_alert_policy" "correlated_degradation_data_service" {
+  count        = var.deploy_aiops_correlation_alerts ? 1 : 0
   project      = var.project_id
   display_name = "${var.cluster_name}-correlated-degradation-data-service"
-  combiner     = "AND"
+  combiner     = "OR" # una sola condition -- el AND real ya está DENTRO de la consulta MQL, ver comentario de cabecera
 
+  # Misma corrección estructural que correlated_degradation de arriba
+  # (ver su comentario y el de cabecera): 1 sola condition MQL con fan-out
+  # { ; } | join en vez de 2 conditions con combiner AND.
   conditions {
-    display_name = "data_service_error_rate fuera de baseline + 2 sigma"
+    display_name = "data_service_error_rate fuera de baseline + 2 sigma Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
     condition_monitoring_query_language {
       query    = <<-MQL
         fetch prometheus_target
-        | metric 'prometheus.googleapis.com/data_service_calls_total/counter'
-        | filter (resource.namespace == '${var.kubernetes_namespace}')
-        | align rate(1m)
-        | group_by [metric.outcome], [val: sum(value.data_service_calls_total)]
-        | { ident
-          | filter metric.outcome != 'success' | group_by [], [error: sum(val)]
-          ; ident
-          | group_by [], [total: sum(val)] }
+        | { metric 'prometheus.googleapis.com/data_service_calls_total/counter'
+            | filter (resource.namespace == '${var.kubernetes_namespace}')
+            | align rate(1m)
+            | group_by [metric.outcome], [val: sum(value.data_service_calls_total)]
+            | { ident
+              | filter metric.outcome != 'success' | group_by [], [error: sum(val)]
+              ; ident
+              | group_by [], [total: sum(val)] }
+            | join
+            | value [error_rate: val(0).error / val(1).total * 100]
+            | value [error_anomaly: error_rate > mean_prev_by(1h) + 2 * stddev_prev_by(1h)]
+          ; metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
+            | filter (resource.namespace == '${var.kubernetes_namespace}')
+            | align delta(1m)
+            | every 1m
+            | group_by [], [p99: percentile(value.http_request_duration_seconds, 99)]
+            | value [latency_high: p99 > ${var.latency_p99_slo_ms / 1000.0}] }
         | join
-        | value [ratio: val(0).error / val(1).total * 100]
-        | condition ratio > mean_prev_by(1h) + 2 * stddev_prev_by(1h)
-      MQL
-      duration = "180s"
-      trigger {
-        count = 1
-      }
-    }
-  }
-
-  conditions {
-    display_name = "latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
-    condition_monitoring_query_language {
-      query    = <<-MQL
-        fetch prometheus_target
-        | metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
-        | filter (resource.namespace == '${var.kubernetes_namespace}')
-        | align delta(1m)
-        | every 1m
-        | group_by [], [val: percentile(value.http_request_duration_seconds, 99)]
-        | condition val > ${var.latency_p99_slo_ms / 1000.0} '1'
+        | condition val(0).error_anomaly && val(1).latency_high '1'
       MQL
       duration = "180s"
       trigger {
@@ -232,6 +263,7 @@ resource "google_monitoring_alert_policy" "correlated_degradation_data_service" 
 # contar falsos positivos sobre el mismo tráfico real para demostrar la
 # reducción de ruido de la alerta correlacionada (Módulo B).
 resource "google_monitoring_alert_policy" "naive_static_threshold" {
+  count        = var.deploy_aiops_correlation_alerts ? 1 : 0
   project      = var.project_id
   display_name = "${var.cluster_name}-naive-static-5xx"
   combiner     = "OR"
