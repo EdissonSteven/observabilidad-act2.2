@@ -1,8 +1,11 @@
 # Runbook 1 -- Módulo A: desplegar la arquitectura completa
 
-Requiere haber pasado el Runbook 0 (`plan` limpio en ambos lados).
+Requiere haber pasado el Runbook 0 (`plan` limpio en GCP). **Alcance de
+esta entrega: solo GCP** -- la sección "AWS" de abajo NO se ejecuta, se
+deja como referencia del diseño equivalente ya escrito y validado
+sintácticamente (ver decisión de alcance en `docs/reporte-ejecutivo-final.md`).
 
-## AWS
+## AWS -- NO EJECUTAR (diseño de referencia, no desplegado en esta entrega)
 
 ```bash
 cd iac/terraform/aws
@@ -38,7 +41,7 @@ aws appmesh list-virtual-nodes --mesh-name observability-lab-mesh
 terraform apply -var enable_app_mesh=false   # revierte, documenta el intento y el error real en el reporte -- NO se inventa evidencia
 ```
 
-## GCP
+## GCP -- ejecutar esto (única nube real de esta entrega)
 
 ```bash
 cd iac/terraform/gcp
@@ -73,11 +76,10 @@ istioctl proxy-status   # todos SYNCED
 
 ## Evidencia a capturar para el reporte (Módulo A)
 
-- Captura de `curl .../orders/{id}` con `customer` poblado, en AMBAS nubes.
-- Trace en Jaeger/Cloud Trace mostrando los 3 spans con atributos
+- Captura de `curl .../orders/{id}` con `customer` poblado, en GCP.
+- Trace en Cloud Trace/Jaeger mostrando los 3 spans con atributos
   `db.system.name`/`db.namespace`/`db.operation.name` de data-service.
-- `aws rds describe-db-instances` / `gcloud sql instances describe` (RDS y
-  Cloud SQL realmente corriendo).
-- `istioctl proxy-status` (GCP) y `aws appmesh list-virtual-nodes` (AWS, si
-  `enable_app_mesh=true` funcionó) o, si no funcionó, el mensaje de error
-  real y la decisión de dejarlo como IaC no aplicado.
+- `gcloud sql instances describe` (Cloud SQL realmente corriendo).
+- `istioctl proxy-status` (todos `SYNCED`).
+- (AWS: no aplica evidencia de ejecución en esta entrega -- el `.tf` en
+  `iac/terraform/aws/` es la evidencia de diseño.)

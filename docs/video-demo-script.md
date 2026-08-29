@@ -5,10 +5,15 @@
 > script para leer palabra por palabra -- es una checklist de qué mostrar
 > en pantalla y en qué orden, para que ningún criterio de la rúbrica quede
 > sin evidencia visual. Cada bloque indica qué pantalla/comando mostrar y
-> qué runbook lo respalda. Si un módulo no se llegó a ejecutar en una nube
-> real, dilo explícitamente en el video ("esto quedó como IaC listo, no
-> desplegado, por costo/tiempo") -- es preferible eso a simular algo que no
-> pasó.
+> qué runbook lo respalda.
+>
+> **Alcance de esta entrega: solo GCP.** El despliegue real que se graba
+> es únicamente en GCP; AWS no se ejecuta (decisión explícita de
+> presupuesto, ver `docs/reporte-ejecutivo-final.md`). Cuando el guion
+> dice "mostrar el `.tf` de AWS", es siempre como diseño de referencia, no
+> como algo desplegado -- dilo así en voz alta en el video ("esto quedó
+> como IaC listo, no desplegado, por decisión de presupuesto") en vez de
+> dar a entender que corrió.
 
 **Duración objetivo:** 12-15 min. **Grabación recomendada:** pantalla
 completa + narración en vivo (no doblaje posterior), para que quede claro
@@ -38,33 +43,35 @@ que los resultados no fueron editados.
   con los atributos `db.system.name`, `db.namespace`,
   `server.address`/`server.port` visibles en el span de `data-service`
   (semantic conventions de DB, Módulo A).
-- [ ] Si se desplegó en GCP/AWS real: mostrar el mismo trace pero apuntando
-  al endpoint de nube, y el estado de Istio/App Mesh (`istioctl proxy-status`
-  o la consola de App Mesh) confirmando el sidecar activo. Si no se
-  desplegó, decirlo aquí y mostrar el `.tf` como evidencia de diseño.
+- [ ] Mostrar el mismo trace pero apuntando al endpoint real de GCP, y
+  `istioctl proxy-status` confirmando el sidecar de Istio activo
+  (`SYNCED`). Para AWS: mostrar brevemente `iac/terraform/aws/appmesh.tf`
+  y decir en voz que es diseño equivalente, no desplegado en esta entrega.
 
 ## 2. AIOps y correlación (Módulo B) -- 2 min
 
-- [ ] Mostrar `observability/prometheus/alert_rules.yml` (o la consola de
-  CloudWatch/Cloud Monitoring si se aplicó) con las dos alertas: la
-  correlacionada (`error_rate > baseline + 2σ AND latency_p99 > SLO`) y la
-  ingenua estática.
+- [ ] Mostrar `observability/prometheus/alert_rules.yml` (diseño
+  cloud-agnostic) y la consola de Cloud Monitoring de GCP ya aplicada, con
+  las dos alertas: la correlacionada (`error_rate > baseline + 2σ AND
+  latency_p99 > SLO`) y la ingenua estática.
 - [ ] Mostrar el conteo real de disparos de cada una sobre la misma
-  ventana (Runbook 2, paso 3) -- captura de `describe-alarm-history` o del
-  panel de Alerting de Cloud Monitoring.
+  ventana (Runbook 2, paso 3) -- panel de Alerting de Cloud Monitoring.
+  (El equivalente de CloudWatch en AWS queda como diseño no desplegado.)
 - [ ] Si se validó el MQL en la consola de GCP (Runbook 2, paso 1), mostrar
   esa captura como evidencia de que la consulta no se dejó "a ciegas".
 
 ## 3. Network & Security (Módulo C) -- 1.5 min
 
-- [ ] Mostrar el dashboard "Golden Signals de Seguridad" (Grafana/Cloud
-  Monitoring/CloudWatch, según dónde se construyó).
-- [ ] Mostrar el resultado real de la consulta de tráfico rechazado
-  (Athena en AWS o el log-based metric en GCP), aunque el resultado sea 0
-  filas -- explicar en voz que eso también es un resultado válido.
-- [ ] Mostrar la salida real de `scripts/aws_preflight_check.sh` y/o
-  `scripts/gcp_preflight_check.sh` para lo que salió bloqueado (ej. Security
-  Hub/SCC) -- es evidencia de que se intentó, no una carencia oculta.
+- [ ] Mostrar el dashboard "Golden Signals de Seguridad" en Cloud
+  Monitoring (GCP).
+- [ ] Mostrar el resultado real del log-based metric de tráfico rechazado
+  en GCP, aunque el resultado sea 0 filas -- explicar en voz que eso
+  también es un resultado válido. (La consulta Athena equivalente en AWS
+  queda como diseño no ejecutado -- mostrarla solo como código si hay
+  tiempo, sin implicar que corrió.)
+- [ ] Mostrar la salida real de `scripts/gcp_preflight_check.sh` para lo
+  que salió bloqueado (ej. Security Command Center) -- es evidencia de
+  que se intentó, no una carencia oculta.
 
 ## 4. Chaos Engineering (Módulo D) -- 4-5 min (el bloque más importante)
 

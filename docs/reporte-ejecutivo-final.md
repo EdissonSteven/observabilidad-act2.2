@@ -12,6 +12,19 @@
 > `docs/reporte-tecnico.md` de la Actividad 2.2). Al convertir esto a PDF
 > (skill `pdf`), apuntar a 10 páginas recortando el detalle de este
 > esqueleto, no añadiendo relleno.
+>
+> **Decisión de alcance (2026-08-29):** el despliegue real de esta entrega
+> se ejecuta únicamente en **GCP** (cuenta con $300 de crédito de prueba).
+> **AWS no se toca** -- ni `terraform apply` ni ningún paso manual --
+> decisión explícita para no arriesgar el presupuesto ajustado del Learner
+> Lab ($19). El Terraform de AWS (RDS, App Mesh, VPC Flow Logs, CloudWatch
+> AIOps, dashboard de seguridad) queda como **diseño completo y validado
+> sintácticamente** (ver `docs/runbooks/00-validacion-local-y-preflight.md`,
+> Paso 0) pero **no desplegado** -- mismo estándar de honestidad que el
+> README/`docs/reporte-tecnico.md` de la Actividad 2.2 ya aplicó al IaC de
+> nube no desplegado en esa entrega. Toda mención más abajo a "ambas
+> nubes" se lee como: GCP con evidencia real, AWS con el `.tf` como
+> evidencia de diseño.
 
 **Autores:** [completar -- mismo equipo de `GameDay_Plan.pdf`]
 **Repositorio:** https://github.com/EdissonSteven/observabilidad-act2.2
@@ -33,19 +46,27 @@ Extiende el pipeline de la Actividad 2.2 (`service-a` orquestador de
 pedidos, `service-b` inventario, PostgreSQL, OTel Collector,
 Jaeger/Tempo/Prometheus/Loki/Grafana) con un tercer microservicio:
 
-| Componente | Rol | Dependencia crítica |
-|---|---|---|
-| `data-service` (FastAPI, :8002) | Perfil de cliente del pedido | Cloud SQL / RDS PostgreSQL (sin timeout ni retry -- mismo patrón de riesgo ya documentado para service-a/service-b en el informe técnico de la Actividad 2.2) |
-| Cloud SQL / RDS (`customersdb`) | Persistencia de `customers`, dedicada a data-service | Peering privado (GCP) / Secrets Manager (AWS) -- ver `iac/terraform/{gcp,cloudsql.tf; aws,rds.tf}` |
-| Service mesh (Istio sobre GKE / AWS App Mesh) | Observabilidad L7 + mTLS entre los 3 microservicios | Envoy sidecar por pod/task |
-| VPC Flow Logs (ambas nubes) | Visibilidad de red N-S/E-W | Sin IAM nuevo en AWS (destino S3); nativo por subred en GCP |
-| CloudWatch Anomaly Detection / Cloud Monitoring MQL | Correlación error_rate + latencia (Módulo B) | Métricas OTel vía el exporter `googlecloud`/`awsemf`-equivalente ya presente en el Collector |
+| Componente | Rol | Dependencia crítica | Alcance de ejecución |
+|---|---|---|---|
+| `data-service` (FastAPI, :8002) | Perfil de cliente del pedido | Cloud SQL / RDS PostgreSQL (sin timeout ni retry -- mismo patrón de riesgo ya documentado para service-a/service-b en el informe técnico de la Actividad 2.2) | **GCP: desplegado.** AWS: código idéntico, IaC listo, no desplegado |
+| Cloud SQL / RDS (`customersdb`) | Persistencia de `customers`, dedicada a data-service | Peering privado (GCP) / Secrets Manager (AWS) -- ver `iac/terraform/{gcp,cloudsql.tf; aws,rds.tf}` | **Cloud SQL: desplegado.** RDS: `.tf` validado, no desplegado |
+| Service mesh (Istio sobre GKE / AWS App Mesh) | Observabilidad L7 + mTLS entre los 3 microservicios | Envoy sidecar por pod/task | **Istio (GKE): desplegado.** App Mesh: `.tf` validado, no desplegado |
+| VPC Flow Logs (GCP; AWS diseñado) | Visibilidad de red N-S/E-W | Sin IAM nuevo en AWS (destino S3); nativo por subred en GCP | **GCP: desplegado.** AWS: `.tf` validado, no desplegado |
+| Cloud Monitoring MQL (GCP; CloudWatch Anomaly Detection diseñado en AWS) | Correlación error_rate + latencia (Módulo B) | Métricas OTel vía el exporter `googlecloud`/`awsemf`-equivalente ya presente en el Collector | **GCP: desplegado y validado en consola.** AWS: `.tf` validado, no desplegado |
 
-Decisión de alcance explícita: `orders`/`inventory` permanecen en el
-Postgres ya usado por service-a/service-b (Fargate en AWS, el Postgres del
-clúster en GCP) -- Cloud SQL/RDS son la base de datos PROPIA y nueva de
+Decisión de alcance explícita (blast radius): `orders`/`inventory`
+permanecen en el Postgres ya usado por service-a/service-b (el Postgres
+del clúster en GCP; el equivalente en Fargate solo existe como diseño en
+AWS) -- Cloud SQL/RDS son la base de datos PROPIA y nueva de
 `data-service`. Ver la justificación completa en
 `iac/terraform/aws/rds.tf` y `iac/terraform/gcp/cloudsql.tf`.
+
+Segunda decisión de alcance, esta de negocio/presupuesto (ver nota al
+inicio del documento): el despliegue real de todo lo anterior se hace
+**solo en GCP**. El Terraform de AWS es código funcionalmente equivalente
+(mismo `data-service`, mismas convenciones semánticas, misma lógica de
+alertas) pero no se ejecuta contra el Learner Lab -- se cita como
+evidencia de diseño, no de ejecución.
 
 [EVIDENCIA PENDIENTE: diagrama de arquitectura actualizado con el 3er
 servicio y la base de datos gestionada -- reutilizar/extender
@@ -62,8 +83,8 @@ servicio y la base de datos gestionada -- reutilizar/extender
 
 | # | Fallo inyectado | Blast radius | Duración | Rollback |
 |---|---|---|---|---|
-| D1 | `tc netem delay 200ms` en `service-b` (docker-compose/GKE) o `INJECT_LATENCY_MS=200` (ECS Fargate, ver justificación de por qué Fargate no admite `NET_ADMIN`) | Solo el tráfico service-a → service-b; PostgreSQL/Cloud SQL/RDS fuera del radio | 60s, ventana corta y cronometrada | `tc qdisc del` automático / redeploy con `INJECT_LATENCY_MS=0` |
-| D2 | `FAULT_INJECT_ERROR_RATE=0.10` en `data-service` (idéntico en los 3 entornos -- variable de aplicación, no depende de capabilities de red) | Solo data-service; service-a/service-b siguen respondiendo, degradados | 60s | Redeploy con `FAULT_INJECT_ERROR_RATE=0` |
+| D1 | `tc netem delay 200ms` en `service-b`, ejecutado en GKE (el modo `INJECT_LATENCY_MS=200` para ECS Fargate queda documentado en el código pero no se ejecuta -- alcance GCP-only de esta entrega) | Solo el tráfico service-a → service-b; PostgreSQL/Cloud SQL fuera del radio | 60s, ventana corta y cronometrada | `tc qdisc del` automático |
+| D2 | `FAULT_INJECT_ERROR_RATE=0.10` en `data-service`, ejecutado en GKE | Solo data-service; service-a/service-b siguen respondiendo, degradados | 60s | Redeploy con `FAULT_INJECT_ERROR_RATE=0` |
 
 Procedimiento completo, comandos exactos y herramientas:
 `docs/runbooks/04-modulo-d-chaos.md`, `chaos/h4_latency_service_b.sh`,
@@ -92,10 +113,14 @@ latency_p99 > SLO_threshold (300ms)
 
 ### 6.1 Procedimiento y herramientas
 
-[EVIDENCIA PENDIENTE: qué nube(s) se usaron realmente, con qué
-configuración exacta (`deploy_rds`, `enable_app_mesh`, región/zona),
-siguiendo `docs/runbooks/01-modulo-a-arquitectura.md` y
-`04-modulo-d-chaos.md`.]
+Nube de ejecución: **GCP únicamente** (ver decisión de alcance al inicio
+del documento). AWS no se aplicó -- el Terraform correspondiente se cita
+como diseño, no como ejecución.
+
+[EVIDENCIA PENDIENTE: configuración exacta usada en GCP (región/zona,
+project ID, si `enable_app_mesh`/`deploy_rds` aplican o son N/A por ser
+variables de AWS), siguiendo `docs/runbooks/01-modulo-a-arquitectura.md` y
+`04-modulo-d-chaos.md` (sección GCP de cada uno).]
 
 ### 6.2 Resultados reales obtenidos
 
@@ -106,8 +131,8 @@ vs. post-rollback para D1 y D2, igual formato que la Tabla de
 
 ### 6.3 MTTD medido
 
-[EVIDENCIA PENDIENTE: salida de `chaos/measure_mttd.py` para D1 y D2, en
-cada nube ejecutada -- ¿estuvo por debajo de 2 minutos?]
+[EVIDENCIA PENDIENTE: salida de `chaos/measure_mttd.py` para D1 y D2 en
+GCP (`--backend gcp`) -- ¿estuvo por debajo de 2 minutos?]
 
 ### 6.4 Comparación esperado vs. obtenido
 
@@ -130,10 +155,16 @@ misma ventana de tráfico -- `docs/runbooks/02-modulo-b-aiops.md` paso 3.]
 
 ## 7. Network & Security Observability (Módulo C)
 
-[EVIDENCIA PENDIENTE: resultado de la consulta Athena (AWS) y del
-log-based metric (GCP) sobre tráfico rechazado; capturas de los
-dashboards "Golden Signals de Seguridad" de ambas nubes;
-disponibilidad real de Security Hub/SCC según los preflights.]
+Ejecutado solo en GCP (ver decisión de alcance). La consulta Athena sobre
+VPC Flow Logs en S3 (`docs/runbooks/03-modulo-c-network-security.md`,
+sección AWS) no se ejecuta -- se documenta como diseño equivalente, ya
+que la lógica (contar tráfico `REJECT` por origen/puerto) es la misma que
+el log-based metric de GCP, solo cambia el motor de consulta.
+
+[EVIDENCIA PENDIENTE: resultado del log-based metric de GCP sobre
+tráfico rechazado; captura del dashboard "Golden Signals de Seguridad"
+de GCP; disponibilidad real de Security Command Center según el
+preflight (`scripts/gcp_preflight_check.sh`).]
 
 Brecha documentada de antemano (no depende de la ejecución): ninguno de
 los 3 microservicios implementa autenticación de usuario final, así que

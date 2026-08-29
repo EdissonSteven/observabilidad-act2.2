@@ -1,23 +1,18 @@
 # Runbook 5 -- Cierre de la ventana de despliegue (obligatorio)
 
-No dejes recursos de nube corriendo entre sesiones de trabajo -- ni el
-Learner Lab de \$19 ni los \$300 de crédito de GCP están pensados para
-correr indefinidamente. Cierra la ventana apenas termines de capturar la
-evidencia del runbook que estabas ejecutando.
+No dejes recursos de nube corriendo entre sesiones de trabajo -- los
+\$300 de crédito de GCP no están pensados para correr indefinidamente.
+Cierra la ventana apenas termines de capturar la evidencia del runbook
+que estabas ejecutando.
 
-## AWS
+## AWS -- no aplica en esta entrega
 
-```bash
-cd iac/terraform/aws
-terraform destroy
-```
-
-Confirmar en la Consola de AWS (ECS, EC2 -> Load Balancers, RDS, ECR,
-S3 -> bucket de flow logs) que no quedó nada huérfano, especialmente si
-algún `apply`/`destroy` se interrumpió a mitad de camino. El Learner Lab
-además puede resetear el ambiente completo al final de la sesión de
-laboratorio -- no dependas de que los recursos sobrevivan entre sesiones
-de AWS Academy.
+No se ejecutó ningún `terraform apply` en AWS (alcance GCP-only, ver
+`docs/reporte-ejecutivo-final.md`), así que no hay nada que destruir ahí.
+Si en algún momento cambias de decisión y aplicas algo en AWS, entonces sí
+corre `cd iac/terraform/aws && terraform destroy` y confirma en la
+Consola de AWS (ECS, EC2 -> Load Balancers, RDS, ECR, S3) que no quedó
+nada huérfano.
 
 ## GCP
 
@@ -37,11 +32,11 @@ en la primera.
 
 ## Checklist final antes de cerrar la ventana
 
-- [ ] `terraform destroy` sin errores en AWS
 - [ ] `terraform destroy` sin errores en GCP
-- [ ] Confirmado $0 en recursos activos en ambas consolas (no solo
+- [ ] Confirmado $0 en recursos activos en la Consola de GCP (no solo
       confiar en la salida de `destroy`)
 - [ ] Toda la evidencia (CSV, capturas, salidas de comandos) ya copiada
       fuera de cualquier recurso que se vaya a borrar
-- [ ] Crédito/presupuesto restante anotado (para saber cuánto margen queda
+- [ ] Crédito restante de GCP anotado (para saber cuánto margen queda
       para la siguiente ventana, si hace falta repetir algo)
+- [ ] Confirmado que no se aplicó nada en AWS (N/A por decisión de alcance)

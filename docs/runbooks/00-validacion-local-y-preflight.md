@@ -1,6 +1,12 @@
 # Runbook 0 -- Validación local (gratis) + preflight de nube
 
-Ejecuta esto ANTES de gastar un solo dólar/crédito de AWS o GCP. Todo en
+> **Alcance de esta entrega: solo GCP.** Decisión explícita para no
+> arriesgar el presupuesto ajustado del Learner Lab de AWS ($19) -- ver la
+> nota al inicio de `docs/reporte-ejecutivo-final.md`. El **Paso 4 (AWS)**
+> de este runbook queda documentado por completitud pero **no se
+> ejecuta**; salta directo del Paso 3 al Paso 5.
+
+Ejecuta esto ANTES de gastar un solo dólar/crédito de GCP. Todo en
 este runbook corre en tu máquina, sin nube real.
 
 ## Paso 0 -- Ya validado de forma estática (sin Docker ni credenciales de nube)
@@ -79,7 +85,9 @@ de los dos, ajusta los umbrales en
 ventanas de 30m del baseline) ANTES de replicar la lógica en la nube --
 es mucho más barato iterar aquí.
 
-## Paso 4 -- Preflight de AWS (Learner Lab)
+## Paso 4 -- Preflight de AWS (Learner Lab) -- NO EJECUTAR en esta entrega
+
+Se deja documentado como referencia/diseño, no como paso a correr:
 
 ```bash
 aws configure   # pega las credenciales temporales del panel de AWS Academy
@@ -88,7 +96,9 @@ aws configure   # pega las credenciales temporales del panel de AWS Academy
 
 Lee cada `[WARN]`/`[FAIL]` -- en particular si `enable_app_mesh=true` es
 viable (política AppMesh en LabRole) y si Security Hub/DevOps Guru están
-disponibles (probablemente no, ya está previsto en el IaC).
+disponibles (probablemente no, ya está previsto en el IaC). **Si decides
+más adelante ejecutar en AWS, entonces sí corre este paso antes de
+cualquier `apply`** -- mientras tanto, continúa directo al Paso 5.
 
 ## Paso 5 -- Preflight de GCP
 
@@ -104,17 +114,17 @@ vinculados) y si hay una organización (Security Command Center).
 ## Paso 6 -- `terraform plan` en seco, sin aplicar nada todavía
 
 ```bash
-cd iac/terraform/aws
-terraform init
-terraform plan -var deploy_rds=false -var enable_app_mesh=false -out=/tmp/aws.tfplan
-# Revisa el resumen: ¿cuántos recursos, de qué tipo? ¿algo inesperado?
-
-cd ../gcp
+cd iac/terraform/gcp
 terraform init
 terraform plan -var project_id=<tu-project-id> -out=/tmp/gcp.tfplan
+# Revisa el resumen: ¿cuántos recursos, de qué tipo? ¿algo inesperado?
 ```
+
+(El `terraform init`/`plan` de `iac/terraform/aws` se omite -- no se va a
+desplegar en esta entrega. Si en algún momento decides sí ejecutar en AWS,
+corre el mismo `plan` ahí antes de cualquier `apply`.)
 
 Si algo en el plan te sorprende o un error de sintaxis aparece, compártelo
 en la conversación antes de aplicar -- reviso el `.tf` correspondiente
-contigo. Solo después de un `plan` limpio en ambos lados se sigue al
-runbook del Módulo A (`01-modulo-a-arquitectura.md`).
+contigo. Solo después de un `plan` limpio en GCP se sigue al runbook del
+Módulo A (`01-modulo-a-arquitectura.md`).

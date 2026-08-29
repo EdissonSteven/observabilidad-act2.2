@@ -1,6 +1,10 @@
 # Runbook 3 -- Módulo C: Network & Security Observability
 
-## AWS -- consultar VPC Flow Logs desde S3 con Athena
+> **Alcance de esta entrega: solo GCP.** La sección "AWS" queda documentada
+> como diseño de referencia (misma lógica de consulta, distinto motor);
+> no se ejecuta.
+
+## AWS -- NO EJECUTAR -- consultar VPC Flow Logs desde S3 con Athena (diseño de referencia)
 
 ```bash
 BUCKET=$(cd iac/terraform/aws && terraform output -raw vpc_flow_logs_bucket)
@@ -24,7 +28,7 @@ aws athena start-query-execution --query-string "SELECT srcaddr, dstport, COUNT(
 
 Revisa el resultado con `aws athena get-query-results --query-execution-id <id>`.
 
-## GCP -- confirmar el log-based metric y el dashboard
+## GCP -- ejecutar esto -- confirmar el log-based metric y el dashboard
 
 ```bash
 # Genera algo de tráfico que dispare la regla deny-all-logged (por ejemplo,
@@ -36,20 +40,22 @@ gcloud logging read 'jsonPayload.disposition="DENIED"' --project <tu-project-id>
 # Dashboard: Cloud Console -> Monitoring -> Dashboards -> "<cluster_name> - Golden Signals de Seguridad"
 ```
 
-## Ambas nubes -- confirmar el resultado del preflight sobre SCC/Security Hub
+## GCP -- confirmar el resultado del preflight sobre Security Command Center
 
-Revisa la salida de `scripts/{aws,gcp}_preflight_check.sh` del Runbook 0.
-Si ambos confirmaron que no están disponibles (esperado en Learner
-Lab/cuenta individual), el reporte documenta esto como brecha explícita
-(ya redactado en `docs/madurez-observabilidad.md`, dominio 5) -- no hace
-falta reintentar.
+Revisa la salida de `scripts/gcp_preflight_check.sh` del Runbook 0. Si
+confirma que SCC no está disponible (esperado en cuenta individual sin
+Organización), el reporte documenta esto como brecha explícita (ya
+redactado en `docs/madurez-observabilidad.md`, dominio 5) -- no hace falta
+reintentar. (El equivalente `scripts/aws_preflight_check.sh` no se
+ejecuta en esta entrega -- alcance GCP-only.)
 
 ## Evidencia a capturar
 
-- Resultado de la consulta Athena (tráfico rechazado real, aunque sea 0
-  filas -- eso también es un resultado válido si no hubo tráfico anómalo
-  durante la ventana).
-- Captura del log-based metric de GCP con datos reales.
-- Captura del dashboard "Golden Signals de Seguridad" en ambas nubes.
-- Salida completa (copiada, no resumida) de ambos scripts de preflight,
+- Captura del log-based metric de GCP con datos reales (aunque sea 0
+  filas de tráfico rechazado -- eso también es un resultado válido si no
+  hubo tráfico anómalo durante la ventana).
+- Captura del dashboard "Golden Signals de Seguridad" en GCP.
+- Salida completa (copiada, no resumida) de `scripts/gcp_preflight_check.sh`,
   como evidencia de qué se intentó y qué se documentó como brecha.
+- (AWS: la consulta Athena y su script de preflight quedan como diseño no
+  ejecutado -- citar el `.tf`/script, no inventar un resultado.)

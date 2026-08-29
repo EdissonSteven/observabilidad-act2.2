@@ -1,32 +1,32 @@
 # Runbook 4 -- Módulo D: Chaos Engineering controlado + MTTD
 
-Requiere Módulos A y B ya desplegados y con alertas activas (Runbooks 1-2).
-**Corre esto en UNA sola ventana de tiempo por nube** -- son los pasos que
-más presupuesto/tiempo de Learner Lab consumen; no los repitas sin
+Requiere Módulo A y B ya desplegados y con alertas activas en GCP
+(Runbooks 1-2). **Alcance de esta entrega: solo GCP** -- los comandos
+`env ecs ...` de abajo quedan documentados como diseño de referencia para
+AWS Fargate, no se ejecutan. **Corre esto en UNA sola ventana de tiempo**
+-- son los pasos que más crédito/tiempo consumen; no los repitas sin
 necesidad.
 
 ## Experimento 1 -- latencia 200ms en service-b
 
 ```bash
 # Terminal 1: tráfico de fondo (deja correr durante TODO el experimento)
-python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h4_<nube>.csv
+python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h4_gcp.csv
 
-# Terminal 2: inyecta el fallo (elige el modo/target según dónde estés)
-./chaos/h4_latency_service_b.sh tc gke 60 observability-lab        # GKE
-./chaos/h4_latency_service_b.sh env ecs 60 observability-lab-cluster service-b   # AWS Fargate
+# Terminal 2: inyecta el fallo vía tc netem en GKE
+./chaos/h4_latency_service_b.sh tc gke 60 observability-lab
+# (el modo "env ecs ..." es el equivalente para AWS Fargate -- no se ejecuta en esta entrega)
 
 # Anota el FAULT_START impreso, y en paralelo (Terminal 3):
 python3 chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name observability-lab-correlated-degradation --fault-start <FAULT_START>
-python3 chaos/measure_mttd.py --backend aws --region us-east-1 --alarm-name observability-lab-correlated-degradation --fault-start <FAULT_START>
 ```
 
 ## Experimento 2 -- error rate 10% en data-service
 
 ```bash
-python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h5_<nube>.csv &
+python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h5_gcp.csv &
 ./chaos/h5_error_rate_data_service.sh gke 60 observability-lab
-./chaos/h5_error_rate_data_service.sh ecs 60 observability-lab-cluster data-service
-python3 chaos/measure_mttd.py --backend <gcp|aws> ...
+python3 chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name observability-lab-correlated-degradation --fault-start <FAULT_START>
 ```
 
 ## Preguntas a responder con datos reales (para el reporte)
@@ -51,7 +51,7 @@ python3 chaos/measure_mttd.py --backend <gcp|aws> ...
 
 ## Evidencia a capturar
 
-- Los 2 (o 4, si se corrió en ambas nubes) CSV de `load_gen.py`.
+- Los 2 CSV de `load_gen.py` (uno por experimento, en GCP).
 - La salida completa de `measure_mttd.py` (incluye el MTTD calculado).
 - Gráfico de latencia real por request durante cada experimento (reutilizar
   el script de matplotlib ya usado para `GameDay_Plan.pdf` si sigue

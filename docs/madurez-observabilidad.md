@@ -8,6 +8,13 @@
 > ejecutivo. Los marcados con ✅ ya están confirmados con evidencia real
 > (código, IaC validado con `python-hcl2`, o docs/reporte-tecnico.md de la
 > Actividad 2.2 heredado).
+>
+> Decisión de alcance: el despliegue real de esta entrega es solo en GCP
+> (ver `docs/reporte-ejecutivo-final.md`). Donde este documento menciona
+> piezas de AWS como "pendientes de aplicar", se leen como "diseñadas,
+> validadas sintácticamente, no desplegadas por decisión de alcance" -- no
+> es una limitación técnica del Learner Lab, es una decisión deliberada de
+> presupuesto.
 
 ## Por qué 8 dominios propios, y no un "blueprint" oficial
 
@@ -102,10 +109,11 @@ enunciado.
 **Qué mide:** visibilidad L7 del tráfico entre microservicios (más allá de
 "llegó/no llegó" -- latencia por request, mTLS, tasa de éxito por ruta).
 
-**Evidencia:** 🔶 Istio (GKE, `iac/istio/`) y AWS App Mesh
-(`iac/terraform/aws/appmesh.tf`, `enable_app_mesh`) diseñados y listos;
-pendientes de aplicar y confirmar `istioctl proxy-status` / métricas de
-Envoy reales.
+**Evidencia:** 🔶 Istio (GKE, `iac/istio/`) diseñado y listo, pendiente de
+aplicar y confirmar `istioctl proxy-status` / métricas de Envoy reales en
+esta ventana de ejecución (GCP). AWS App Mesh
+(`iac/terraform/aws/appmesh.tf`, `enable_app_mesh`) queda como diseño
+equivalente no desplegado -- decisión de alcance, no limitación técnica.
 
 **Nivel actual (provisional): 2→3 tras Fase 3.** Sin mesh desplegado, la
 observabilidad de red hoy es la que ya daba VPC Flow Logs (dominio 5) --
@@ -126,11 +134,13 @@ comportamiento esperado (baseline ± σ) en vez de solo un umbral fijo, y si
 correlaciona más de una señal.
 
 **Evidencia:** regla de correlación implementada 3 veces (Prometheus local
-✅ diseño completo, `AWS CloudWatch Anomaly Detection` 🔶, `GCP Cloud
-Monitoring MQL` 🔶 pendiente de validar sintaxis contra la consola real).
+✅ diseño completo, `GCP Cloud Monitoring MQL` 🔶 pendiente de validar
+sintaxis contra la consola real y de aplicar -- esta es la que se ejecuta
+de verdad en esta entrega; `AWS CloudWatch Anomaly Detection` queda como
+diseño equivalente no desplegado, decisión de alcance).
 Comparación cuantitativa contra alarma de umbral estático diseñada
-(`naive_static_threshold`/`NaiveStatic5xx`) para medir reducción real de
-falsos positivos.
+(`naive_static_threshold`/`NaiveStatic5xx`, en GCP) para medir reducción
+real de falsos positivos.
 
 **Nivel actual (provisional): 3→4 tras Fase 3**, condicionado a que la
 alerta compuesta dispare correctamente y se cuente la reducción de ruido
@@ -147,8 +157,10 @@ rechazado, superficie de autenticación).
 
 **Evidencia y brecha explícita:** VPC Flow Logs + Firewall Rule Logging
 diseñados en ambas nubes (`iac/terraform/aws/vpc_flow_logs.tf`,
-`iac/terraform/gcp/network_security.tf`). **Security Command Center no se
-puede activar** en un proyecto GCP de prueba individual sin una
+`iac/terraform/gcp/network_security.tf`), pero **desplegados y verificados
+solo en GCP** en esta entrega (decisión de alcance; el `.tf` de AWS es
+evidencia de diseño). **Security Command Center no se puede activar** en
+un proyecto GCP de prueba individual sin una
 organización de Cloud Identity/Workspace detrás (confirmado por
 `scripts/gcp_preflight_check.sh`, `gcloud organizations list` vacío en una
 cuenta personal) -- se documenta como brecha real, no oculta. Tampoco hay
@@ -171,11 +183,13 @@ implícitamente por el enunciado del Módulo D).
 **Qué mide:** si las alertas están atadas a SLOs con error budget, y si el
 tiempo de detección es medible y aceptable (< 2 min, según el enunciado).
 
-**Evidencia:** 🔶 `chaos/measure_mttd.py` diseñado para medir MTTD real
-contra los 3 backends; SLO de latencia p99 explícito
-(`latency_p99_slo_ms`, mismo valor en ambas nubes para comparar).
-Pendiente: MTTD real de los 2 experimentos del Módulo D, y cálculo de
-consumo de error budget durante cada ventana.
+**Evidencia:** 🔶 `chaos/measure_mttd.py` diseñado para medir MTTD contra
+Prometheus local, GCP (Cloud Monitoring) y AWS (CloudWatch) -- solo el
+backend `gcp` se ejercita en esta entrega; SLO de latencia p99 explícito
+(`latency_p99_slo_ms`, mismo valor definido en ambos módulos Terraform
+para que la comparación sea justa si algún día se despliega también en
+AWS). Pendiente: MTTD real de los 2 experimentos del Módulo D en GCP, y
+cálculo de consumo de error budget durante cada ventana.
 
 **Nivel actual (provisional): 3→4 tras Fase 3**, condicionado a MTTD
 medido < 2 min en al menos un experimento.
