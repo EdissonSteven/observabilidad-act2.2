@@ -100,11 +100,19 @@ resource "google_project_iam_member" "gke_nodes_artifact_reader" {
 
 # ---------------------------------------------------------------------------
 # GKE cluster
+#
+# `location = var.zone` (una ZONA, no var.region) a propósito -- ver el
+# comentario completo en variables.tf (variable "zone") sobre el hallazgo
+# real del primer apply: con la región como location, GKE crea un clúster
+# REGIONAL que replica el node pool en las 3 zonas (initial_node_count se
+# multiplica x3), lo que agotó la cuota SSD_TOTAL_GB del proyecto de
+# prueba. Zonal = 3x menos nodos, acorde al resto del diseño ("lab
+# pequeño, no producción").
 # ---------------------------------------------------------------------------
 
 resource "google_container_cluster" "primary" {
   name     = var.cluster_name
-  location = var.region
+  location = var.zone
   project  = var.project_id
 
   network    = google_compute_network.vpc.id
@@ -152,7 +160,7 @@ resource "google_container_cluster" "primary" {
 
 resource "google_container_node_pool" "primary_nodes" {
   name     = "${var.cluster_name}-pool"
-  location = var.region
+  location = var.zone
   cluster  = google_container_cluster.primary.name
 
   initial_node_count = var.initial_node_count
@@ -170,6 +178,14 @@ resource "google_container_node_pool" "primary_nodes" {
   node_config {
     machine_type    = var.node_machine_type
     service_account = google_service_account.gke_nodes.email
+
+    # pd-standard a propósito: cuenta contra la cuota DISKS_TOTAL_GB, NO
+    # contra SSD_TOTAL_GB (que es la que agotó el primer apply real -- ver
+    # el comentario de variable "zone" en variables.tf). 30 GB alcanza de
+    # sobra para las 3 imágenes pequeñas de este lab; margen adicional
+    # junto con el cambio a clúster zonal, no una alternativa a él.
+    disk_type    = "pd-standard"
+    disk_size_gb = 30
 
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",

@@ -31,7 +31,9 @@ output "otel_collector_endpoint" {
 
 output "get_credentials_command" {
   description = "gcloud command to fetch kubeconfig for this cluster."
-  value       = "gcloud container clusters get-credentials ${google_container_cluster.primary.name} --region ${var.region} --project ${var.project_id}"
+  # --zone, no --region: el clúster es zonal a propósito (ver variable
+  # "zone" en variables.tf).
+  value       = "gcloud container clusters get-credentials ${google_container_cluster.primary.name} --zone ${var.zone} --project ${var.project_id}"
 }
 
 output "cloudsql_customers_private_ip" {

@@ -4,9 +4,38 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "GCP region for the cluster, network, and Artifact Registry."
+  description = "GCP region for the network, Artifact Registry and Cloud SQL (recursos regionales). El clúster GKE usa var.zone, no esta -- ver esa variable para el porqué."
   type        = string
   default     = "us-central1"
+}
+
+variable "zone" {
+  description = <<-EOT
+    Zona específica (dentro de var.region) donde se crea el clúster GKE y
+    su node pool. Hallazgo real del primer apply que sí llegó a crear el
+    clúster (2026-08-29): con `google_container_cluster.location =
+    var.region` (una REGIÓN, no una zona), GKE crea un clúster REGIONAL,
+    que replica el node pool en las 3 zonas de la región por defecto --
+    "initial_node_count" se multiplica POR ZONA
+    (https://docs.cloud.google.com/kubernetes-engine/docs/concepts/regional-clusters:
+    "The default node pool created for regional Standard clusters
+    consists of nine nodes (three per zone)..."). Con
+    initial_node_count=2 eso son 6 nodos e2-standard-4 desde el arranque
+    (hasta 12 con el autoscaling max_node_count=4 por zona) -- el apply
+    falló con "Quota 'SSD_TOTAL_GB' exceeded. Limit: 250.0 in region
+    us-central1" porque el disco de arranque por defecto de GKE 1.24+ es
+    pd-balanced, que SÍ cuenta contra esa cuota
+    (https://docs.cloud.google.com/compute/resource-usage: "This quota
+    applies to... Zonal and Regional Balanced Persistent Disk"). Un
+    clúster ZONAL (esta variable) usa initial_node_count como TOTAL, no
+    por zona -- 3x menos nodos, consistente con el comentario ya existente
+    en node_machine_type ("Kept small since this is a graded lab, not
+    production"). Además se fijó node_config.disk_type = "pd-standard" en
+    main.tf (cuenta contra la cuota separada DISKS_TOTAL_GB, no contra
+    SSD_TOTAL_GB) como margen adicional.
+  EOT
+  type        = string
+  default     = "us-central1-a"
 }
 
 variable "cluster_name" {
