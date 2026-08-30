@@ -45,34 +45,79 @@ resource "google_compute_firewall" "deny_all_logged" {
   }
 }
 
-# Hallazgo real (2026-08-30, análisis de 10.338 conexiones rechazadas en 6h
-# con scripts/analyze_denied_traffic.py): la métrica original NO tenía labels,
-# así que la alerta solo podía decir "hubo N conexiones rechazadas" sin
-# ninguna dimensión -- el mismo defecto que hace ilegible el mensaje de las
-# policies de Módulo B (ver hallazgo del mensaje `metric: __missing__` en
-# docs/modulo-d-resultados.md). Se añaden labels para poder desglosar.
-#
-# QUÉ SE PUEDE Y QUÉ NO SE PUEDE ETIQUETAR (decisión de cardinalidad):
-# Cloud Logging documenta un máximo de 10 labels por métrica y ~30.000 series
-# temporales activas, con recomendación explícita de usar solo "conjuntos
-# pequeños de valores discretos"
-# (https://docs.cloud.google.com/logging/docs/logs-based-metrics/labels).
-# Medido sobre la ventana real de 6h:
-#   - src_ip    : 3.789 valores distintos -> INVIABLE como label
-#   - dest_port : 4.802 valores distintos -> INVIABLE como label
-#   - country   :    69 valores           -> OK
-#   - protocol  :     2 valores (TCP/UDP) -> OK
-#   - dest_ip   :     3 valores (los nodos del clúster) -> OK
-# Combinación: 69 x 2 x 3 = 414 series como máximo, muy por debajo del límite.
-# El desglose por IP origen y puerto destino (que es el que distingue un
-# escaneo dirigido del ruido de fondo) NO puede vivir en la métrica: vive en
-# scripts/analyze_denied_traffic.py, que consulta los logs directamente.
+# La métrica ORIGINAL se deja EXACTAMENTE como estaba, sin labels, a
+# propósito. Ver el comentario de google_logging_metric.denied_traffic_labeled
+# más abajo para el hallazgo completo y por qué hay dos métricas.
 resource "google_logging_metric" "denied_traffic" {
   project     = var.project_id
   name        = "${var.cluster_name}-denied-connections"
-  description = "Conteo de conexiones rechazadas por firewall (Módulo C: golden signal de tráfico anómalo N-S/E-W). Etiquetado por país de origen, protocolo y nodo destino -- ver el comentario del recurso para por qué NO se etiqueta por IP origen ni puerto destino."
+  description = "Conteo de conexiones rechazadas por firewall (Módulo C: golden signal de tráfico anómalo N-S/E-W). Sin labels: es la que consume la alert policy y la que conserva el historial -- ver denied_traffic_labeled para el desglose."
   filter      = "resource.type=\"gce_subnetwork\" jsonPayload.disposition=\"DENIED\""
 
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# HALLAZGO REAL (2026-08-30): por qué existen DOS métricas sobre los mismos logs
+# ---------------------------------------------------------------------------
+# Se intentó añadir labels (country/protocol/dest_ip) a la métrica original
+# para poder desglosar el tráfico rechazado en el dashboard. Terraform lo
+# planificó como REEMPLAZO (`must be replaced`, con `+ labels { # forces
+# replacement }` en las tres), porque cambiar el metric_descriptor de una
+# métrica basada en logs no es una operación in-place.
+#
+# El apply falló con un error real de la API:
+#
+#   Error 400: Cannot delete metric observability-lab-gke-denied-connections.
+#   That metric is still used in an alerting policy.
+#
+# Es la MISMA protección de integridad referencial que ya había bloqueado la
+# destrucción accidental del notification channel (ver el hallazgo 5 del
+# Módulo D). GCP se niega a borrar recursos de observabilidad que estén
+# referenciados, lo cual en ambos casos evitó una pérdida no intencionada.
+#
+# Había dos salidas posibles:
+#   (a) Migrar en dos pasos: crear la métrica con labels, repuntar la alert
+#       policy a ella, y en un segundo apply borrar la original. Termina con
+#       UNA sola métrica, más limpio.
+#   (b) Conservar la original para la alerta y añadir una segunda con labels
+#       solo para el dashboard.
+#
+# Se eligió (b), y la razón NO es la comodidad: las métricas basadas en logs
+# NO se recalculan retroactivamente -- una métrica nueva empieza a contar
+# desde su creación. La opción (a) habría destruido el historial de la
+# métrica que produjo la mejor evidencia del Módulo C (los dos disparos
+# reales de la alerta: 7.43 y 12.78 conexiones/s, con su recuperación a los
+# 1 min 51 s). Esa serie temporal es irreproducible: el tráfico de escaneo de
+# esa ventana no vuelve.
+#
+# El costo de (b) es redundancia: dos métricas contando exactamente los
+# mismos logs. Se asume a conciencia y queda documentado aquí. Si en algún
+# momento el historial deja de importar, consolidar en una sola siguiendo (a).
+resource "google_logging_metric" "denied_traffic_labeled" {
+  project     = var.project_id
+  name        = "${var.cluster_name}-denied-connections-labeled"
+  description = "Igual que ${var.cluster_name}-denied-connections pero CON labels, para el desglose del dashboard. Existe por separado para no destruir el historial de la original -- ver el comentario del recurso."
+  filter      = "resource.type=\"gce_subnetwork\" jsonPayload.disposition=\"DENIED\""
+
+  # QUÉ SE PUEDE Y QUÉ NO SE PUEDE ETIQUETAR (decisión de cardinalidad):
+  # Cloud Logging documenta máximo 10 labels y ~30.000 series activas por
+  # métrica, recomendando solo "conjuntos pequeños de valores discretos"
+  # (https://docs.cloud.google.com/logging/docs/logs-based-metrics/labels).
+  # Medido sobre la ventana real de 6h (10.338 conexiones):
+  #   - src_ip    : 3.789 valores distintos -> INVIABLE
+  #   - dest_port : 4.802 valores distintos -> INVIABLE
+  #   - country   :    69 valores           -> OK
+  #   - protocol  :     2 valores           -> OK
+  #   - dest_ip   :     3 valores (los nodos) -> OK
+  # Máximo 69 x 2 x 3 = 414 series. El desglose por IP origen y puerto
+  # destino -- que es justamente el que distingue un escaneo dirigido del
+  # ruido de fondo -- NO cabe en una métrica y vive en
+  # scripts/analyze_denied_traffic.py.
   metric_descriptor {
     metric_kind = "DELTA"
     value_type  = "INT64"
@@ -81,7 +126,7 @@ resource "google_logging_metric" "denied_traffic" {
     labels {
       key         = "country"
       value_type  = "STRING"
-      description = "País de origen (código ISO-3 que asigna GCP en jsonPayload.remote_location.country)."
+      description = "País de origen (código ISO-3 de jsonPayload.remote_location.country)."
     }
     labels {
       key         = "protocol"
@@ -212,7 +257,7 @@ resource "google_monitoring_dashboard" "security_golden_signals" {
               dataSets = [{
                 timeSeriesQuery = {
                   timeSeriesFilter = {
-                    filter = "resource.type=\"gce_subnetwork\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.denied_traffic.name}\""
+                    filter = "resource.type=\"gce_subnetwork\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.denied_traffic_labeled.name}\""
                     aggregation = {
                       alignmentPeriod    = "60s"
                       perSeriesAligner   = "ALIGN_RATE"
