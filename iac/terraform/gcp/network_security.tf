@@ -45,16 +45,60 @@ resource "google_compute_firewall" "deny_all_logged" {
   }
 }
 
+# Hallazgo real (2026-08-30, análisis de 10.338 conexiones rechazadas en 6h
+# con scripts/analyze_denied_traffic.py): la métrica original NO tenía labels,
+# así que la alerta solo podía decir "hubo N conexiones rechazadas" sin
+# ninguna dimensión -- el mismo defecto que hace ilegible el mensaje de las
+# policies de Módulo B (ver hallazgo del mensaje `metric: __missing__` en
+# docs/modulo-d-resultados.md). Se añaden labels para poder desglosar.
+#
+# QUÉ SE PUEDE Y QUÉ NO SE PUEDE ETIQUETAR (decisión de cardinalidad):
+# Cloud Logging documenta un máximo de 10 labels por métrica y ~30.000 series
+# temporales activas, con recomendación explícita de usar solo "conjuntos
+# pequeños de valores discretos"
+# (https://docs.cloud.google.com/logging/docs/logs-based-metrics/labels).
+# Medido sobre la ventana real de 6h:
+#   - src_ip    : 3.789 valores distintos -> INVIABLE como label
+#   - dest_port : 4.802 valores distintos -> INVIABLE como label
+#   - country   :    69 valores           -> OK
+#   - protocol  :     2 valores (TCP/UDP) -> OK
+#   - dest_ip   :     3 valores (los nodos del clúster) -> OK
+# Combinación: 69 x 2 x 3 = 414 series como máximo, muy por debajo del límite.
+# El desglose por IP origen y puerto destino (que es el que distingue un
+# escaneo dirigido del ruido de fondo) NO puede vivir en la métrica: vive en
+# scripts/analyze_denied_traffic.py, que consulta los logs directamente.
 resource "google_logging_metric" "denied_traffic" {
   project     = var.project_id
   name        = "${var.cluster_name}-denied-connections"
-  description = "Conteo de conexiones rechazadas por firewall (Módulo C: golden signal de tráfico anómalo N-S/E-W)."
+  description = "Conteo de conexiones rechazadas por firewall (Módulo C: golden signal de tráfico anómalo N-S/E-W). Etiquetado por país de origen, protocolo y nodo destino -- ver el comentario del recurso para por qué NO se etiqueta por IP origen ni puerto destino."
   filter      = "resource.type=\"gce_subnetwork\" jsonPayload.disposition=\"DENIED\""
 
   metric_descriptor {
     metric_kind = "DELTA"
     value_type  = "INT64"
     unit        = "1"
+
+    labels {
+      key         = "country"
+      value_type  = "STRING"
+      description = "País de origen (código ISO-3 que asigna GCP en jsonPayload.remote_location.country)."
+    }
+    labels {
+      key         = "protocol"
+      value_type  = "STRING"
+      description = "Número de protocolo IP (6=TCP, 17=UDP)."
+    }
+    labels {
+      key         = "dest_ip"
+      value_type  = "STRING"
+      description = "IP del nodo del clúster que recibió el intento."
+    }
+  }
+
+  label_extractors = {
+    "country"  = "EXTRACT(jsonPayload.remote_location.country)"
+    "protocol" = "EXTRACT(jsonPayload.connection.protocol)"
+    "dest_ip"  = "EXTRACT(jsonPayload.connection.dest_ip)"
   }
 }
 
@@ -107,9 +151,27 @@ resource "google_monitoring_alert_policy" "anomalous_denied_traffic" {
 # iac/terraform/aws/security_dashboard.tf): ni service-a, ni service-b, ni
 # data-service implementan autenticación de usuario final, así que
 # "intentos de autenticación fallidos" no tiene una señal real en ESTE
-# sistema. El dashboard adapta el concepto a lo que sí se observa: tráfico
-# rechazado (arriba), conexiones a Cloud SQL, y saturación de CPU/memoria
-# de los pods como proxy de escaneos/DoS de bajo volumen.
+# sistema. El dashboard adapta el concepto a lo que sí se observa.
+#
+# CORRECCIÓN (2026-08-30): este comentario decía antes que el dashboard
+# incluía un panel de "saturación de CPU/memoria de los pods como proxy de
+# escaneos/DoS de bajo volumen" -- ese panel NUNCA estuvo implementado en los
+# tiles. El comentario prometía algo que el código no entregaba. Se sustituye
+# por un panel que sí aporta señal de seguridad directa: el desglose del
+# tráfico rechazado POR PAÍS DE ORIGEN, posible ahora que la métrica tiene
+# labels (ver el comentario de google_logging_metric.denied_traffic arriba).
+# La saturación de CPU como proxy de DoS era una señal indirecta y forzada;
+# el desglose geográfico del tráfico rechazado responde directamente a la
+# pregunta "¿esto es ruido difuso o una fuente concentrada?".
+#
+# LO QUE ESTE DASHBOARD NO PUEDE MOSTRAR, y por qué: el desglose por IP
+# origen y por puerto destino es el que de verdad distingue un escaneo
+# dirigido del ruido de fondo (hallazgo real: una sola IP de GCP generó el
+# 9,5 % del tráfico rechazado en 6h, TODA ella contra el puerto 443 --
+# perfil claramente distinto del resto, que es difuso). Pero esas dos
+# dimensiones tienen 3.789 y 4.802 valores distintos respectivamente, muy
+# por encima de lo que admite una métrica basada en logs. Ese análisis vive
+# en scripts/analyze_denied_traffic.py, que consulta Cloud Logging directo.
 resource "google_monitoring_dashboard" "security_golden_signals" {
   project        = var.project_id
   dashboard_json = jsonencode({
@@ -136,6 +198,27 @@ resource "google_monitoring_dashboard" "security_golden_signals" {
                   timeSeriesFilter = {
                     filter = "resource.type=\"gce_subnetwork\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.denied_traffic.name}\""
                     aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_RATE" }
+                  }
+                }
+              }]
+            }
+          }
+        },
+        {
+          width = 12, height = 4, yPos = 6,
+          widget = {
+            title = "Tráfico rechazado por país de origen (¿difuso o concentrado?)"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "resource.type=\"gce_subnetwork\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.denied_traffic.name}\""
+                    aggregation = {
+                      alignmentPeriod    = "60s"
+                      perSeriesAligner   = "ALIGN_RATE"
+                      crossSeriesReducer = "REDUCE_SUM"
+                      groupByFields      = ["metric.label.country"]
+                    }
                   }
                 }
               }]
