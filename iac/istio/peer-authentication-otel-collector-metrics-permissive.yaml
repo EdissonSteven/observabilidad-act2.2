@@ -1,0 +1,48 @@
+# Excepción de mTLS a nivel de puerto para el scraping de Google Managed
+# Prometheus (Módulo B) -- SIN esto, el mTLS STRICT del namespace completo
+# (ver peer-authentication-strict-mtls.yaml) bloquea el scraping y NINGUNA
+# métrica llega a Cloud Monitoring desde que el otel-collector recibe el
+# sidecar de Istio.
+#
+# Hallazgo real (2026-08-30, Módulo D Experimento 2): tras el
+# `kubectl rollout restart deployment ... otel-collector postgres` del
+# runbook de Istio (necesario para que les inyecte el sidecar), TODAS las
+# métricas de aplicación (incluyendo `http_requests_total`, que ya estaba
+# confirmado funcionando en Módulo B) dejaron de llegar a Cloud Monitoring
+# -- confirmado con Metrics Explorer completamente vacío durante >1 hora,
+# pese a tráfico real constante. Causa raíz confirmada contra la
+# documentación oficial de Istio (https://istio.io/latest/docs/ops/integrations/prometheus/):
+# "If you use STRICT mode, then Prometheus will need to be configured to
+# scrape using Istio certificates" -- Google Managed Prometheus es un
+# scraper EXTERNO al mesh (sin sidecar, sin certificados mTLS de istiod),
+# así que con STRICT mTLS activo en el namespace, Envoy rechaza su
+# conexión en texto plano al puerto 8889 (el que expone el exporter
+# `prometheus` del otel-collector, scrapeado por el PodMonitoring de
+# iac/gmp/podmonitoring-otel-collector.yaml).
+#
+# Fix: un PeerAuthentication ADICIONAL (no se toca el "default" de
+# peer-authentication-strict-mtls.yaml), con un selector que apunta SOLO
+# al otel-collector, que declara `portLevelMtls` en el puerto 8889 en modo
+# PERMISSIVE (acepta texto plano Y mTLS en ese puerto específico) --
+# sintaxis y semántica confirmadas contra la referencia oficial
+# (https://istio.io/latest/docs/reference/config/security/peer_authentication/).
+# Un PeerAuthentication con selector de workload tiene precedencia sobre
+# el de todo el namespace para ese workload, así que el resto de puertos
+# del otel-collector (el receptor OTLP gRPC/HTTP en 4317/4318, que sí
+# recibe tráfico real de otras apps del mesh) se queda en STRICT sin
+# cambios -- solo el puerto de métricas queda expuesto en texto plano,
+# que es justo lo que un scraper externo como GMP necesita.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: otel-collector-permit-plaintext-metrics
+  namespace: observability-lab
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    8889:
+      mode: PERMISSIVE

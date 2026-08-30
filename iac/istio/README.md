@@ -58,6 +58,38 @@ kubectl apply -f iac/istio/peer-authentication-strict-mtls.yaml
 kubectl apply -f iac/istio/destination-rules.yaml
 ```
 
+## Excepción de mTLS para el scraping de Google Managed Prometheus (Módulo B)
+
+**Aplica esto justo después de lo anterior, ANTES de dar por buena la
+observabilidad de Módulo B.** Hallazgo real (2026-08-30, Módulo D
+Experimento 2): con `PeerAuthentication` en STRICT para todo el
+namespace, Google Managed Prometheus (un scraper EXTERNO al mesh, sin
+sidecar ni certificados de istiod) queda bloqueado al intentar scrapear el
+puerto 8889 del `otel-collector` -- confirmado contra la documentación
+oficial de Istio (https://istio.io/latest/docs/ops/integrations/prometheus/):
+*"If you use STRICT mode, then Prometheus will need to be configured to
+scrape using Istio certificates"*. Efecto real observado: TODAS las
+métricas de aplicación (incluso `http_requests_total`, ya confirmado
+funcionando antes) dejaron de llegar a Cloud Monitoring desde el momento
+en que el otel-collector recibió el sidecar de Istio, sin ningún error
+visible en sus logs (el bloqueo ocurre en el sidecar `istio-proxy`, no en
+el proceso del collector).
+
+Fix (sintaxis confirmada contra la referencia oficial de
+`PeerAuthentication`, https://istio.io/latest/docs/reference/config/security/peer_authentication/):
+un `PeerAuthentication` adicional, con selector apuntando solo al
+otel-collector, que declara el puerto 8889 en modo `PERMISSIVE` (acepta
+texto plano Y mTLS ahí) sin tocar el resto de sus puertos ni la policy
+`default` de todo el namespace:
+
+```bash
+kubectl apply -f iac/istio/peer-authentication-otel-collector-metrics-permissive.yaml
+```
+
+Dale ~1-2 min tras aplicarlo, genera tráfico real, y confirma en Metrics
+Explorer que `http_requests_total` vuelve a mostrar datos antes de seguir
+con las policies de AIOps.
+
 ## Verificación
 
 ```bash
