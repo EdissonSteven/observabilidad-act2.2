@@ -37,6 +37,7 @@ import json
 import subprocess
 import sys
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 
 # Numeros de protocolo IP (IANA). Solo los que aparecen en logs de firewall.
 PROTOCOLS = {1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 50: "ESP", 58: "ICMPv6"}
@@ -96,6 +97,98 @@ def table(counter, total, title, width=42, top=15, annotate=None):
               f"{100.0 * rest / total if total else 0:>5.1f} %")
 
 
+
+def _pct(vals, p):
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    if len(s) == 1:
+        return float(s[0])
+    k = (len(s) - 1) * (p / 100.0)
+    lo, hi = int(k), min(int(k) + 1, len(s) - 1)
+    return float(s[lo]) if lo == hi else s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+def burst_analysis(entries, threshold, n_src_ips=0):
+    """Distribucion de la tasa por minuto -- para elegir el umbral de la alerta con datos.
+
+    La alert policy `anomalous_denied_traffic` usa ALIGN_RATE con
+    alignment_period de 60s, o sea que compara CONEXIONES POR SEGUNDO
+    promediadas por minuto. Elegir ese umbral a ojo produce una alerta que
+    dispara con el ruido de fondo de internet (que es permanente y no
+    accionable). Esta funcion mide la distribucion real para poder fijarlo.
+    """
+    per_min = Counter()
+    for e in entries:
+        ts = e.get("timestamp") or e.get("receiveTimestamp")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        per_min[dt.astimezone(timezone.utc).replace(second=0, microsecond=0)] += 1
+
+    if not per_min:
+        print("\n(sin timestamps utilizables para el analisis de rafagas)")
+        return
+
+    # Minutos sin ninguna conexion no aparecen en el Counter, pero SI cuentan
+    # como 0 para la distribucion: se rellenan entre el primer y ultimo minuto.
+    lo, hi = min(per_min), max(per_min)
+    total_min = int((hi - lo).total_seconds() // 60) + 1
+    counts = [per_min.get(lo + timedelta(minutes=i), 0) for i in range(total_min)]
+    rates = [c / 60.0 for c in counts]  # conexiones/segundo, igual que ALIGN_RATE
+
+    over = sum(1 for r in rates if r > threshold)
+    print("\n" + "=" * 70)
+    print(" DISTRIBUCION DE LA TASA POR MINUTO (para calibrar el umbral)")
+    print("=" * 70)
+    print(f"  Minutos analizados     : {total_min}")
+    print(f"  Tasa media             : {sum(rates) / len(rates):.2f} conexiones/s")
+    print(f"  p50 / p95 / p99        : {_pct(rates, 50):.2f} / {_pct(rates, 95):.2f} / {_pct(rates, 99):.2f} conexiones/s")
+    print(f"  Maximo observado       : {max(rates):.2f} conexiones/s")
+    print()
+    print(f"  Umbral actual de la alerta: {threshold} conexiones/s")
+    print(f"  Minutos que lo superan    : {over} de {total_min} ({100.0 * over / total_min:.1f} %)")
+    if over:
+        print()
+        print(f"  -> La alerta dispararia {over} vez/veces en esta ventana SIN que haya")
+        print("     ocurrido ningun incidente real: es ruido de fondo de internet.")
+    else:
+        print("  -> El umbral no se supera en esta ventana: no genera falsos positivos aqui.")
+
+    # Tabla de calibracion: no existe un umbral "correcto" objetivo -- existe
+    # el umbral que corresponde a la tasa de falsos positivos que se acepte.
+    # Se muestra la equivalencia para que la decision sea informada y quede
+    # documentada en el reporte, en vez de elegir un numero a ojo.
+    print()
+    print("  Calibracion -- cuantas veces dispararia cada umbral en esta ventana:")
+    print(f"    {'umbral (conex/s)':<20} {'minutos que disparan':>22} {'% ventana':>12}")
+    candidates = sorted({round(_pct(rates, q), 2) for q in (50, 90, 95, 99, 99.9)}
+                        | {round(max(rates), 2), round(max(rates) * 1.5, 2), float(threshold)})
+    for c in candidates:
+        n = sum(1 for r in rates if r > c)
+        tag = "  <- actual" if abs(c - threshold) < 1e-9 else ""
+        print(f"    {c:<20.2f} {n:>22} {100.0 * n / total_min:>11.1f} %{tag}")
+    print()
+    print(f"  Para NO disparar con el ruido observado hace falta un umbral por")
+    print(f"  encima de {max(rates):.2f} conexiones/s (el maximo de esta ventana).")
+    print("  Advertencia: si en esta ventana hubo un escaneo dirigido real, ese")
+    print("  maximo lo incluye -- calibrar sobre una ventana que se sepa limpia.")
+    print()
+    print("  LIMITACION DE FONDO: ningun umbral de VOLUMEN puede distinguir un")
+    print("  escaneo dirigido de una rafaga de ruido, porque ambos se ven igual")
+    print("  en esta metrica. Distinguirlos exige mirar la CONCENTRACION por IP")
+    print(f"  origen -- y esa NO puede ser un label de la metrica ({n_src_ips:,} valores")
+    print("  distintos en esta ventana, contra el limite practico que documenta")
+    print("  https://docs.cloud.google.com/logging/docs/logs-based-metrics/labels:")
+    print("  ~30.000 series activas por metrica, con recomendacion explicita de")
+    print("  usar solo conjuntos pequeños de valores discretos).")
+    print("  Por eso ese analisis vive en este script y no en la alerta.")
+    print("=" * 70)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -103,6 +196,8 @@ def main():
     src.add_argument("--project", help="Proyecto de GCP (lee de Cloud Logging)")
     src.add_argument("--input", help="Archivo JSON ya volcado con gcloud logging read")
     p.add_argument("--freshness", default="6h", help="Ventana de tiempo (default 6h)")
+    p.add_argument("--alert-threshold", type=float, default=5.0,
+                   help="Umbral actual de la alerta en conexiones/s (default 5, = var.denied_traffic_alert_threshold)")
     args = p.parse_args()
 
     entries = (json.load(open(args.input)) if args.input
@@ -180,6 +275,8 @@ def main():
     print("  que el mecanismo de deteccion funciona. La distribucion de arriba es")
     print("  lo que permite distinguir escaneo dirigido de ruido de fondo.")
     print("=" * 70)
+
+    burst_analysis(entries, args.alert_threshold, len(src_ips))
 
 
 if __name__ == "__main__":
