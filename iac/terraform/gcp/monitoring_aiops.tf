@@ -1,6 +1,68 @@
 # ---------------------------------------------------------------------------
 # AIOps: detección de anomalías + correlación (Módulo B).
 #
+# ===========================================================================
+# HALLAZGO 5 (2026-08-30) -- MIGRACIÓN DE MQL A PromQL. LEER ANTES QUE NADA:
+# los comentarios de MQL de más abajo (hallazgos 1-4) quedan como registro
+# histórico de la depuración, pero las 3 policies YA NO USAN MQL.
+# ===========================================================================
+#
+# Contexto: tras aplicar las policies en MQL y ejecutar los Experimentos 1 y
+# 2 del Módulo D contra GKE real, NINGUNA disparó pese a fallos reales y
+# medibles en los CSV de load_gen.py. La depuración (documentada completa en
+# docs/runbooks/02-modulo-b-aiops.md) encontró tres cosas encadenadas:
+#
+#   a) Un corte total del pipeline de métricas causado por el mTLS STRICT de
+#      Istio bloqueando el scraping de Google Managed Prometheus -- resuelto
+#      con iac/istio/peer-authentication-otel-collector-metrics-permissive.yaml.
+#      Nada de lo de abajo se podía diagnosticar hasta arreglar esto.
+#
+#   b) El AND estructural: `condition val(0) && val(1)` exige error Y latencia
+#      elevados SIMULTÁNEAMENTE, y cada experimento producía UN solo síntoma
+#      (el Exp. 1 sube latencia sin errores; el Exp. 2, cuyo fault injection
+#      es un fast-fail, sube errores SIN subir latencia). Un fallo de un solo
+#      síntoma no puede activar una regla de correlación de dos síntomas --
+#      de ahí chaos/run_experimento_d3_combinado.sh.
+#
+#   c) Imposibilidad de validar MQL antes de aplicarlo. Cada iteración de la
+#      MQL costaba un `terraform apply` completo y solo devolvía un Error 400
+#      genérico. Cuatro hallazgos (1-4 abajo) fueron cuatro ciclos de prueba
+#      y error contra la API real.
+#
+# Decisión: reescribir las 3 policies con `condition_prometheus_query_language`
+# (PromQL), soportado por Cloud Monitoring y por el provider de Terraform
+# (https://docs.cloud.google.com/monitoring/promql/create-promql-alerts).
+# La razón principal NO es elegancia sintáctica sino VERIFICABILIDAD: Google
+# Managed Service for Prometheus expone una API PromQL en
+# https://monitoring.googleapis.com/v1/projects/PROJECT/location/global/prometheus/api/v1/query
+# (https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui),
+# así que CADA consulta de abajo se puede probar con un `curl` de 5 segundos
+# contra los datos reales ANTES de aplicar el Terraform -- y lo que se prueba
+# es literalmente lo que la policy evalúa. Con MQL se volaba a ciegas.
+# Además el `and` nativo de PromQL expresa la correlación directamente, sin
+# el `{ ; } | join | condition val(0) && val(1)` que produjo los Error 400.
+#
+# Cambio de diseño en la rama de LATENCIA: se abandonó `histogram_quantile`.
+# Los bucket boundaries reales (_SECONDS_BUCKETS en telemetry.py) son
+# 0.005 .. 10 s y NO incluyen 0.3 -- el SLO original de 300 ms caía entre las
+# fronteras 0.25 y 0.5, así que cualquier p99 reportado ahí era un artefacto
+# de la interpolación de histogram_quantile, no una medición. En su lugar se
+# usa la fracción de peticiones bajo el bucket del SLO:
+#
+#     sum(rate(..._bucket{le="0.25"}[2m])) / sum(rate(..._count[2m])) < 0.99
+#
+# que es equivalente a "p99 > 250 ms" (si menos del 99 % está por debajo del
+# umbral, el p99 lo supera) pero es un conteo EXACTO. El SLO efectivo pasó de
+# 300 a 250 ms -- más estricto, no más laxo. Ver la validación de
+# variables.tf/latency_p99_slo_ms, que impide poner un valor que no sea una
+# frontera de bucket (haría que la alerta nunca dispare, en silencio).
+#
+# Trampa verificada en vivo: sin tráfico, rate() da 0 en todos los buckets y
+# histogram_quantile devuelve NaN, que GMP DESCARTA (resultado vacío, no
+# "NaN"). Varias consultas de diagnóstico parecían "sin datos" simplemente
+# porque el generador de carga no estaba corriendo. Siempre validar con
+# tráfico activo.
+#
 # GCP Cloud Monitoring no tiene un equivalente directo a
 # ANOMALY_DETECTION_BAND de CloudWatch como función de metric math genérica
 # reutilizable en cualquier alerta -- el camino nativo más cercano es MQL
@@ -170,34 +232,37 @@ resource "google_monitoring_alert_policy" "correlated_degradation" {
   # con combiner AND -- la API de GCP no lo permite para
   # condition_monitoring_query_language (Error 400 real, ver cabecera).
   conditions {
-    display_name = "error_rate > ${var.error_rate_threshold_pct}% Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
-    condition_monitoring_query_language {
-      query    = <<-MQL
-        fetch prometheus_target
-        | { { metric 'prometheus.googleapis.com/http_requests_total/counter'
-              | filter (resource.namespace == '${var.kubernetes_namespace}' && metric.status == '500')
-              | align rate(1m)
-              | group_by [], .sum
-            ; metric 'prometheus.googleapis.com/http_requests_total/counter'
-              | filter (resource.namespace == '${var.kubernetes_namespace}')
-              | align rate(1m)
-              | group_by [], .sum }
-            | join
-            | div
-            | value [error_high: val() * 100 > ${var.error_rate_threshold_pct}]
-          ; metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
-            | filter (resource.namespace == '${var.kubernetes_namespace}')
-            | align delta(1m)
-            | every 1m
-            | group_by [], [p99: percentile(value.http_request_duration_seconds, 99)]
-            | value [latency_high: p99 > ${var.latency_p99_slo_ms / 1000.0}] }
-        | join
-        | condition val(0) && val(1)
-      MQL
-      duration = "180s"
-      trigger {
-        count = 1
-      }
+    display_name = "error_rate > ${var.error_rate_threshold_pct}% Y latencia p99 > SLO (${var.latency_p99_slo_ms} ms)"
+    condition_prometheus_query_language {
+      # El AND de la correlación es el operador `and` nativo de PromQL: ambos
+      # lados agregan con sum() sin `by`, así que producen series con el mismo
+      # conjunto (vacío) de labels y hacen match. Mucho más directo que el
+      # `{ ; } | join | condition val(0) && val(1)` de MQL, que costó dos
+      # Error 400 reales antes de compilar (ver hallazgos 1-4 de la cabecera).
+      #
+      # Rama de latencia: en vez de histogram_quantile se usa la FRACCIÓN de
+      # peticiones por debajo del bucket del SLO. Es equivalente a "p99 > SLO"
+      # (si menos del 99% de las peticiones está bajo el umbral, entonces el
+      # p99 lo supera) pero es un conteo EXACTO, sin la interpolación que
+      # histogram_quantile hace entre fronteras de bucket -- ver hallazgo 5.
+      query = <<-PROMQL
+        (
+          sum(rate(http_requests_total{namespace="${var.kubernetes_namespace}",status="500"}[2m]))
+          /
+          sum(rate(http_requests_total{namespace="${var.kubernetes_namespace}"}[2m]))
+          * 100 > ${var.error_rate_threshold_pct}
+        )
+        and
+        (
+          sum(rate(http_request_duration_seconds_bucket{namespace="${var.kubernetes_namespace}",le="${var.latency_p99_slo_ms / 1000}"}[2m]))
+          /
+          sum(rate(http_request_duration_seconds_count{namespace="${var.kubernetes_namespace}"}[2m]))
+          < 0.99
+        )
+      PROMQL
+
+      duration            = "60s"
+      evaluation_interval = "30s"
     }
   }
 
@@ -257,44 +322,37 @@ resource "google_monitoring_alert_policy" "correlated_degradation_data_service" 
   count        = var.deploy_aiops_correlation_alerts ? 1 : 0
   project      = var.project_id
   display_name = "${var.cluster_name}-correlated-degradation-data-service"
-  combiner     = "OR" # una sola condition -- el AND real ya está DENTRO de la consulta MQL, ver comentario de cabecera
+  combiner     = "OR" # una sola condition -- el AND real es el operador `and` DENTRO de la consulta PromQL
 
-  # Misma corrección estructural que correlated_degradation de arriba
-  # (ver su comentario y el de cabecera): 1 sola condition MQL con fan-out
-  # { ; } | join en vez de 2 conditions con combiner AND.
+  # Misma estructura que correlated_degradation de arriba: 1 sola condition
+  # en PromQL, con el `and` nativo uniendo señal de error y señal de latencia.
   conditions {
-    display_name = "data_service_error_rate > ${var.error_rate_threshold_pct}% Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
-    condition_monitoring_query_language {
-      # Mismo patrón corregido que correlated_degradation de arriba
-      # (acceso posicional tras join, sin funciones inventadas, umbral
-      # estático en vez de baseline dinámico -- ver esa policy y
-      # variables.tf/error_rate_threshold_pct para el hallazgo completo).
-      query    = <<-MQL
-        fetch prometheus_target
-        | { { metric 'prometheus.googleapis.com/data_service_calls_total/counter'
-              | filter (resource.namespace == '${var.kubernetes_namespace}' && metric.outcome != 'success')
-              | align rate(1m)
-              | group_by [], .sum
-            ; metric 'prometheus.googleapis.com/data_service_calls_total/counter'
-              | filter (resource.namespace == '${var.kubernetes_namespace}')
-              | align rate(1m)
-              | group_by [], .sum }
-            | join
-            | div
-            | value [error_high: val() * 100 > ${var.error_rate_threshold_pct}]
-          ; metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
-            | filter (resource.namespace == '${var.kubernetes_namespace}')
-            | align delta(1m)
-            | every 1m
-            | group_by [], [p99: percentile(value.http_request_duration_seconds, 99)]
-            | value [latency_high: p99 > ${var.latency_p99_slo_ms / 1000.0}] }
-        | join
-        | condition val(0) && val(1)
-      MQL
-      duration = "180s"
-      trigger {
-        count = 1
-      }
+    display_name = "data_service_error_rate > ${var.error_rate_threshold_pct}% Y latencia p99 > SLO (${var.latency_p99_slo_ms} ms)"
+    condition_prometheus_query_language {
+      # Esta es la segunda VÍA DE ERROR (degradación silenciosa de
+      # data-service: service-a atrapa el fallo y responde 200 igual, así
+      # que http_requests_total nunca ve un 5xx). La rama de latencia es
+      # idéntica a la de correlated_degradation -- ver esa policy y el
+      # hallazgo 5 de la cabecera para por qué se usa la fracción bajo el
+      # bucket del SLO en vez de histogram_quantile.
+      query = <<-PROMQL
+        (
+          sum(rate(data_service_calls_total{namespace="${var.kubernetes_namespace}",outcome!="success"}[2m]))
+          /
+          sum(rate(data_service_calls_total{namespace="${var.kubernetes_namespace}"}[2m]))
+          * 100 > ${var.error_rate_threshold_pct}
+        )
+        and
+        (
+          sum(rate(http_request_duration_seconds_bucket{namespace="${var.kubernetes_namespace}",le="${var.latency_p99_slo_ms / 1000}"}[2m]))
+          /
+          sum(rate(http_request_duration_seconds_count{namespace="${var.kubernetes_namespace}"}[2m]))
+          < 0.99
+        )
+      PROMQL
+
+      duration            = "60s"
+      evaluation_interval = "30s"
     }
   }
 
@@ -334,19 +392,17 @@ resource "google_monitoring_alert_policy" "naive_static_threshold" {
 
   conditions {
     display_name = "cualquier request con status 500"
-    condition_monitoring_query_language {
-      query    = <<-MQL
-        fetch prometheus_target
-        | metric 'prometheus.googleapis.com/http_requests_total/counter'
-        | filter (resource.namespace == '${var.kubernetes_namespace}' && metric.status == '500')
-        | align rate(1m)
-        | group_by [], [val: sum(value.http_requests_total)]
-        | condition cast_units(val, "1") > 0
-      MQL
-      duration = "60s"
-      trigger {
-        count = 1
-      }
+    condition_prometheus_query_language {
+      # Deliberadamente INGENUA: dispara ante CUALQUIER 5xx, sin mirar la
+      # proporción ni correlacionar con latencia. Es el baseline de ruido
+      # contra el que se mide la reducción de falsos positivos de las dos
+      # policies correlacionadas (Módulo B, Runbook 2 Paso 3).
+      query = <<-PROMQL
+        sum(rate(http_requests_total{namespace="${var.kubernetes_namespace}",status="500"}[2m])) > 0
+      PROMQL
+
+      duration            = "60s"
+      evaluation_interval = "30s"
     }
   }
 

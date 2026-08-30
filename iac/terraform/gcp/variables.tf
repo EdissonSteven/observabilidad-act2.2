@@ -180,9 +180,33 @@ variable "inject_latency_ms" {
 # ---------------------------------------------------------------------------
 
 variable "latency_p99_slo_ms" {
-  description = "Umbral de SLO de latencia p99 (milisegundos) para GET /orders/{id}. Mismo valor de referencia que el lado AWS (ver iac/terraform/aws/variables.tf) para poder comparar ambas nubes en el reporte."
+  description = <<-EOT
+    Umbral de SLO de latencia p99 (milisegundos) para GET /orders/{id}.
+
+    IMPORTANTE (hallazgo real 2026-08-30): este valor DEBE coincidir con una
+    frontera de bucket real del histograma. Las policies de correlación de
+    monitoring_aiops.tf ya no usan histogram_quantile sino la fracción de
+    peticiones bajo el bucket `le="<este valor>/1000"`, que es un conteo
+    exacto en vez de una interpolación. Si se pone un valor que no coincide
+    con ninguna frontera, el selector `le="..."` no hace match con ninguna
+    serie, la consulta devuelve vacío y la alerta NUNCA dispara -- en
+    silencio, sin ningún error. De ahí la validación de abajo.
+
+    Las fronteras vienen de _SECONDS_BUCKETS en services/*/app/telemetry.py:
+    5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000 ms.
+
+    Se bajó de 300 ms (valor original, que NO es una frontera) a 250 ms, la
+    frontera inmediatamente inferior -- es decir, un SLO ligeramente MÁS
+    estricto, no más laxo. Si se quiere volver a 300 ms hay que añadir 0.3 a
+    _SECONDS_BUCKETS en telemetry.py y reconstruir las imágenes.
+  EOT
   type        = number
-  default     = 300
+  default     = 250
+
+  validation {
+    condition     = contains([5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000], var.latency_p99_slo_ms)
+    error_message = "latency_p99_slo_ms debe coincidir con una frontera de bucket del histograma (5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000 ms) -- ver _SECONDS_BUCKETS en services/*/app/telemetry.py. Un valor fuera de esa lista hace que la alerta nunca dispare, en silencio."
+  }
 }
 
 variable "error_rate_threshold_pct" {
