@@ -15,17 +15,39 @@
 # seguridad.
 #
 # Security Command Center: NO se incluye como recurso de Terraform aquí a
-# propósito. SCC (Standard o Premium) se activa a nivel de ORGANIZACIÓN de
-# GCP (Cloud Identity/Workspace), no de proyecto -- una cuenta de prueba
-# gratuita individual (como la de este laboratorio, creada con correo
-# institucional pero sin una organización de GCP detrás) normalmente NO
-# tiene un recurso de organización al que engancharse, y
-# `google_scc_*` fallaría con "no organization found" al aplicar. Se deja
-# documentado como intento a verificar en el preflight
-# (scripts/gcp_preflight_check.sh corre `gcloud organizations list`) y,
-# si no hay organización disponible, como brecha explícita en
-# docs/madurez-observabilidad.md (dominio 5) con el log-based metric de
-# abajo como sustituto funcional dentro del alcance de este laboratorio.
+# propósito. SCC se activa a nivel de ORGANIZACIÓN de GCP, no de proyecto, y
+# su alcance son los proyectos que cuelgan de esa organización.
+#
+# VERIFICADO CON EVIDENCIA REAL (2026-08-30), y el camino hasta la
+# verificación es en sí un hallazgo:
+#
+#   $ gcloud organizations list          -> devuelve 1 organización
+#   $ gcloud projects describe observabilidad-lab-507021 \
+#       --format='value(parent.type,parent.id)'
+#                                        -> VACÍO
+#
+# Las dos cosas son compatibles y la distinción es la que importa: la cuenta
+# (@unisabana.edu.co, institucional) SÍ ve una organización, pero el proyecto
+# de este laboratorio fue creado FUERA de ella -- es un proyecto huérfano,
+# sin parent. `gcloud organizations list` responde "qué organizaciones ve el
+# usuario", no "de qué organización cuelga el proyecto".
+#
+# Conclusión: SCC no es aplicable a este proyecto. No hay organización de la
+# que cuelgue, así que no hay nada a lo que engancharlo.
+#
+# Y aunque el proyecto colgara de la organización institucional, activarlo
+# seguiría estando FUERA DE ALCANCE: SCC afectaría a TODOS los proyectos de
+# la Universidad, no solo a este, con implicaciones de costo y de política
+# que no corresponden a un trabajo individual de maestría.
+#
+# El sustituto funcional dentro del alcance real del laboratorio es el
+# Firewall Rule Logging + log-based metric de abajo. Documentado como brecha
+# explícita en docs/madurez-observabilidad.md (dominio 5).
+#
+# NOTA sobre el preflight: scripts/gcp_preflight_check.sh comprobaba esto MAL
+# (usaba `gcloud organizations list` y concluía "SCC podría habilitarse", un
+# [OK] infundado). Ya está corregido para mirar el parent del proyecto. Un
+# preflight que da un OK engañoso es peor que no tenerlo.
 # ---------------------------------------------------------------------------
 
 resource "google_compute_firewall" "deny_all_logged" {

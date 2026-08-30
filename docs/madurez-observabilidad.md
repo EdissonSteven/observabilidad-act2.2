@@ -159,13 +159,41 @@ rechazado, superficie de autenticación).
 diseñados en ambas nubes (`iac/terraform/aws/vpc_flow_logs.tf`,
 `iac/terraform/gcp/network_security.tf`), pero **desplegados y verificados
 solo en GCP** en esta entrega (decisión de alcance; el `.tf` de AWS es
-evidencia de diseño). **Security Command Center no se puede activar** en
-un proyecto GCP de prueba individual sin una
-organización de Cloud Identity/Workspace detrás (confirmado por
-`scripts/gcp_preflight_check.sh`, `gcloud organizations list` vacío en una
-cuenta personal) -- se documenta como brecha real, no oculta. Tampoco hay
-autenticación de usuario final en ninguno de los 3 microservicios, así que
-"intentos de autenticación fallidos" no es una señal real del sistema.
+evidencia de diseño).
+
+**Security Command Center no es aplicable a este proyecto**, verificado con
+evidencia real (2026-08-30). SCC se activa a nivel de organización y su
+alcance son los proyectos que cuelgan de ella. La comprobación decisiva no
+es si la cuenta ve alguna organización, sino de cuál cuelga el proyecto:
+
+```
+$ gcloud organizations list          -> 1 organización
+$ gcloud projects describe observabilidad-lab-507021 \
+    --format='value(parent.type,parent.id)'
+                                     -> (vacío)
+```
+
+Ambos resultados son compatibles: la cuenta institucional
+(@unisabana.edu.co) sí pertenece a una organización, pero el proyecto de
+este laboratorio se creó FUERA de ella -- es un proyecto huérfano, sin
+parent. No hay organización a la que enganchar SCC.
+
+Y aunque el proyecto colgara de la organización de la Universidad, activar
+SCC seguiría estando fuera de alcance: afectaría a **todos** los proyectos
+institucionales, no solo a este, con implicaciones de costo y de política
+ajenas a un trabajo individual. La decisión de no activarlo sería la misma.
+
+*Hallazgo metodológico asociado:* `scripts/gcp_preflight_check.sh`
+comprobaba esto incorrectamente -- usaba `gcloud organizations list` y
+concluía "SCC podría habilitarse", un `[OK]` infundado que contradecía la
+realidad. Ya está corregido para mirar el `parent` del proyecto. Un
+preflight que da un OK engañoso es peor que no tener preflight, porque
+induce confianza donde no la hay; es el mismo tipo de defecto que este
+laboratorio busca detectar en los sistemas que observa.
+
+Tampoco hay autenticación de usuario final en ninguno de los 3
+microservicios, así que "intentos de autenticación fallidos" no es una
+señal real del sistema.
 
 **Nivel actual: 2.** Hay señal de red (flow logs, tráfico rechazado) pero
 sin la capa de postura de seguridad centralizada (SCC/Security Hub) ni
