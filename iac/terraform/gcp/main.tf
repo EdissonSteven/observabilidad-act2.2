@@ -264,6 +264,24 @@ resource "google_container_node_pool" "primary_nodes" {
 resource "kubernetes_namespace" "app" {
   metadata {
     name = var.kubernetes_namespace
+
+    # Hallazgo real (2026-08-30): el label `istio-injection=enabled` se
+    # había puesto a mano con `kubectl label namespace ... --overwrite`
+    # (paso manual de iac/istio/README.md) DESPUÉS de instalar Istio -- y
+    # el siguiente `terraform apply` (uno normal, para el fix del
+    # PodMonitoring, sin relación con Istio) se lo comió sin avisar. El
+    # provider `hashicorp/kubernetes` trata `metadata.labels` como el
+    # mapa COMPLETO y autoritativo: en cada apply lo sobrescribe para que
+    # coincida exactamente con lo declarado aquí, sin importar qué se
+    # haya agregado por fuera con kubectl (evidencia: el propio provider
+    # tuvo que crear los recursos aparte `kubernetes_labels`/
+    # `kubernetes_annotations` para poder manejar un subconjunto de
+    # labels sin este problema). Declararlo aquí, dentro de Terraform, es
+    # la forma de que sobreviva a cualquier `apply` futuro -- ya no hace
+    # falta el paso manual de `kubectl label` después de instalar Istio.
+    labels = {
+      "istio-injection" = "enabled"
+    }
   }
 
   depends_on = [google_container_node_pool.primary_nodes]

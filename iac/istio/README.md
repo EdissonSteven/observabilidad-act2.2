@@ -34,11 +34,21 @@ istioctl x precheck                 # valida ANTES de instalar -- responde
                                      # directamente al pedido de "no correr
                                      # y que no funcione" del runbook general
 istioctl install --set profile=demo -y
-kubectl label namespace observability-lab istio-injection=enabled --overwrite
+```
 
+El label `istio-injection=enabled` del namespace ya lo declara
+`kubernetes_namespace.app` en `iac/terraform/gcp/main.tf` -- no hace falta
+ponerlo a mano con `kubectl label`. Hallazgo real (2026-08-30): un
+`kubectl label ... --overwrite` manual SÍ funciona al momento, pero el
+provider `hashicorp/kubernetes` trata `metadata.labels` como el mapa
+completo y autoritativo -- el siguiente `terraform apply` (aunque sea por
+un cambio sin relación con Istio) se lo come sin avisar. Por eso quedó
+declarado en el propio `.tf`: sobrevive a cualquier `apply` futuro.
+
+```bash
 # Reinicia los Deployments para que el sidecar de Envoy se inyecte
 # (la inyección automática solo aplica a pods NUEVOS después del label):
-kubectl rollout restart deployment -n observability-lab service-a service-b data-service
+kubectl rollout restart deployment -n observability-lab service-a service-b data-service otel-collector postgres
 ```
 
 ## mTLS estricto entre los 3 microservicios
