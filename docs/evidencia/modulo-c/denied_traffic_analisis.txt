@@ -1,0 +1,97 @@
+======================================================================
+ Golden signals de seguridad -- trafico rechazado por firewall
+======================================================================
+ Conexiones rechazadas   : 10,338
+ IPs origen distintas    : 3,789
+ Puertos destino distintos: 4,802
+ Paises origen distintos : 69
+
+IPs ORIGEN mas frecuentes
+----------------------------------------------------------------------
+  34.153.177.134                                 982    9.5 %
+  216.180.246.210                                153    1.5 %
+  194.180.48.45                                  122    1.2 %
+  194.180.48.47                                  108    1.0 %
+  206.183.111.36                                  54    0.5 %
+  208.109.242.255                                 54    0.5 %
+  136.113.243.77                                  38    0.4 %
+  85.217.140.49                                   35    0.3 %
+  85.217.140.46                                   33    0.3 %
+  85.217.140.10                                   33    0.3 %
+  85.217.140.39                                   33    0.3 %
+  85.217.140.45                                   32    0.3 %
+  85.217.140.42                                   32    0.3 %
+  85.217.140.13                                   32    0.3 %
+  85.217.140.53                                   32    0.3 %
+  ... otros 3774 valores                        8565   82.8 %
+
+PUERTOS DESTINO mas atacados
+----------------------------------------------------------------------
+  443                                           1117   10.8 %  [HTTPS]
+  23                                             389    3.8 %  [Telnet]
+  22                                             141    1.4 %  [SSH]
+  80                                              98    0.9 %  [HTTP]
+  8080                                            53    0.5 %  [HTTP-alt]
+  3389                                            40    0.4 %  [RDP]
+  8443                                            32    0.3 %  [HTTPS-alt]
+  53                                              27    0.3 %  [DNS]
+  8000                                            25    0.2 %
+  8081                                            24    0.2 %
+  8888                                            23    0.2 %
+  10443                                           23    0.2 %
+  9200                                            22    0.2 %  [Elasticsearch]
+  9443                                            21    0.2 %
+  3306                                            21    0.2 %  [MySQL]
+  ... otros 4787 valores                        8282   80.1 %
+
+PAISES de origen (codigo ISO-3 de GCP)
+----------------------------------------------------------------------
+  USA                                           4903   47.4 %
+  GBR                                           2270   22.0 %
+  NLD                                           1163   11.2 %
+  BGR                                            257    2.5 %
+  POL                                            243    2.4 %
+  DEU                                            212    2.1 %
+  CHN                                            160    1.5 %
+  FRA                                            127    1.2 %
+  BRA                                             90    0.9 %
+  HKG                                             82    0.8 %
+  SYC                                             79    0.8 %
+  IND                                             76    0.7 %
+  SGP                                             74    0.7 %
+  JPN                                             63    0.6 %
+  BEL                                             49    0.5 %
+  ... otros 54 valores                           490    4.7 %
+
+PROTOCOLOS
+----------------------------------------------------------------------
+  6                                             9833   95.1 %  [TCP]
+  17                                             505    4.9 %  [UDP]
+
+IPs DESTINO alcanzadas (nodos del cluster)
+----------------------------------------------------------------------
+  10.10.0.13                                    5633   54.5 %
+  10.10.0.14                                    4703   45.5 %
+  34.30.240.77                                     2    0.0 %
+
+REGLAS de firewall que rechazaron
+----------------------------------------------------------------------
+  observability-lab-vpc-deny-all-logged        10338  100.0 %
+
+======================================================================
+ INTERPRETACION
+======================================================================
+  Trafico al rango NodePort de K8s (30000-32767): 174 (1.7 %)
+  Trafico a puertos de servicios conocidos      : 2,097 (20.3 %)
+
+  Concentracion: la IP mas activa (34.153.177.134) genera el 9.5 %
+  del trafico rechazado.
+  -> Muy disperso (muchas IPs, pocas conexiones cada una): patron
+     tipico de escaneo de fondo de internet, no de un ataque dirigido.
+
+  NOTA: la regla deny_all_logged tiene prioridad 65534 y source_ranges
+  0.0.0.0/0, asi que captura TODO lo que ninguna regla mas especifica
+  permitio. Un volumen alto NO implica por si solo un ataque -- implica
+  que el mecanismo de deteccion funciona. La distribucion de arriba es
+  lo que permite distinguir escaneo dirigido de ruido de fondo.
+======================================================================

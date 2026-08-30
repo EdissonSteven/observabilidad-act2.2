@@ -1,0 +1,40 @@
+# Evidencia del experimento INVÁLIDO del 2026-08-30T14:07:58Z
+#
+# El script h6_blip_postgres.sh se ejecutó completo y sin errores: borró el
+# pod de Postgres, esperó a que volviera, registró los timestamps y generó
+# este CSV. Pero el kubectl port-forward estaba caído tras un reciclaje de
+# Cloud Shell, así que NINGÚN request llegó al clúster.
+#
+# El tamaño del archivo original (128 MB) es en sí la evidencia: como cada
+# petición fallaba al instante, load_gen giró a máxima velocidad durante los
+# 420s en vez de a ~4 req/s. Un experimento que 'funcionó' y no midió nada.
+#
+# Filas totales:
+1774035
+# Distribución de status:
+1774034 ERR
+# Distribución de notas (primeras 5):
+1774034 <urlopen error [Errno 99] Cannot assign requested address>
+#
+# Muestra de las primeras 20 filas:
+t_s,status,latency_ms,note
+0.037,ERR,37.12,<urlopen error [Errno 99] Cannot assign requested address>
+0.038,ERR,0.42,<urlopen error [Errno 99] Cannot assign requested address>
+0.038,ERR,0.26,<urlopen error [Errno 99] Cannot assign requested address>
+0.038,ERR,0.26,<urlopen error [Errno 99] Cannot assign requested address>
+0.038,ERR,0.28,<urlopen error [Errno 99] Cannot assign requested address>
+0.039,ERR,0.23,<urlopen error [Errno 99] Cannot assign requested address>
+0.039,ERR,0.23,<urlopen error [Errno 99] Cannot assign requested address>
+0.039,ERR,0.22,<urlopen error [Errno 99] Cannot assign requested address>
+0.039,ERR,0.27,<urlopen error [Errno 99] Cannot assign requested address>
+0.04,ERR,0.23,<urlopen error [Errno 99] Cannot assign requested address>
+0.04,ERR,0.21,<urlopen error [Errno 99] Cannot assign requested address>
+0.04,ERR,0.23,<urlopen error [Errno 99] Cannot assign requested address>
+0.04,ERR,0.27,<urlopen error [Errno 99] Cannot assign requested address>
+0.041,ERR,0.26,<urlopen error [Errno 99] Cannot assign requested address>
+0.041,ERR,0.21,<urlopen error [Errno 99] Cannot assign requested address>
+0.041,ERR,0.22,<urlopen error [Errno 99] Cannot assign requested address>
+0.041,ERR,0.23,<urlopen error [Errno 99] Cannot assign requested address>
+0.041,ERR,0.25,<urlopen error [Errno 99] Cannot assign requested address>
+0.042,ERR,0.21,<urlopen error [Errno 99] Cannot assign requested address>
+0.042,ERR,0.21,<urlopen error [Errno 99] Cannot assign requested address>
