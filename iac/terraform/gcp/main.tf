@@ -115,7 +115,13 @@ resource "google_project_iam_member" "gke_nodes_artifact_reader" {
 # ---------------------------------------------------------------------------
 
 resource "google_service_account" "otel_collector" {
-  account_id   = "${var.cluster_name}-otel-collector"
+  # account_id NO deriva de var.cluster_name a propósito: los IDs de
+  # cuenta de servicio de GCP tienen un máximo de 30 caracteres
+  # (^[a-z](?:[-a-z0-9]{4,28}[a-z0-9])$) -- "${var.cluster_name}-otel-
+  # collector" con el cluster_name por defecto ya da 36 y falla el regex
+  # (hallazgo real, 2026-08-30). Un id fijo y corto es suficiente: solo
+  # necesita ser único dentro del proyecto, no describir el clúster.
+  account_id   = "otel-collector"
   display_name = "otel-collector Workload Identity SA (${var.cluster_name})"
 
   depends_on = [google_project_service.iam]
