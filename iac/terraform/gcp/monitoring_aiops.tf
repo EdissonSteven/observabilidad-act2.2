@@ -6,10 +6,15 @@
 # reutilizable en cualquier alerta -- el camino nativo más cercano es MQL
 # (Monitoring Query Language) con una condición de umbral calculada sobre
 # una ventana móvil. Se implementa aquí explícitamente la regla del
-# enunciado (baseline + 2σ Y latency_p99 > SLO) en MQL en vez de depender
-# de un producto de ML de caja negra -- más transparente para el reporte
-# (se puede mostrar y explicar la fórmula exacta), y evita depender de una
-# feature que pueda no estar disponible en un proyecto de prueba nuevo.
+# enunciado (originalmente: baseline + 2σ Y latency_p99 > SLO) en MQL en
+# vez de depender de un producto de ML de caja negra -- más transparente
+# para el reporte (se puede mostrar y explicar la fórmula exacta), y evita
+# depender de una feature que pueda no estar disponible en un proyecto de
+# prueba nuevo. NOTA (2026-08-30, ver hallazgo 3 más abajo y
+# variables.tf/error_rate_threshold_pct): el lado de error_rate del
+# baseline se simplificó de dinámico (media+2σ) a un umbral ESTÁTICO tras
+# no poder confirmar contra la consola real la sintaxis MQL de ventana
+# deslizante -- el AND real con latency_p99 sigue intacto.
 #
 # Requiere que las métricas de negocio (http_request_duration_seconds,
 # http_requests_total, data_service_calls_total) lleguen a Cloud
@@ -74,6 +79,47 @@
 #    `terraform apply -var deploy_aiops_correlation_alerts=true`, después
 #    de desplegar las apps y generar tráfico real (Runbook 1 + Runbook 2
 #    Paso 1).
+#
+# 3) HALLAZGO DEL PASO 1 DE VALIDACIÓN (2026-08-30, ya ejecutado):
+#    "Línea N: Expected: ',' or '|'. Instead found: ''1''" al pegar la
+#    query en Metrics Explorer -- las 3 policies tenían
+#    `| condition <expr> '1'`, con un argumento de string inventado
+#    después de la expresión booleana que NO existe en la sintaxis real
+#    de `condition`. Confirmado contra la documentación oficial de MQL: el
+#    operador `condition` toma SOLO el predicado booleano
+#    (`Table | condition predicate: Bool`), sin ningún argumento después
+#    -- el único ejemplo oficial (`| condition val() > 5'GBy'`) tiene la
+#    unidad `'GBy'` pegada al número 5, no como argumento aparte de
+#    `condition`; se confundió una cosa con la otra al escribir el
+#    borrador original. Corregido en las 3 policies (se quitó el `'1'`
+#    final). El resto de la query (`fetch`/`{ ; }`/`join`/
+#    `mean_prev_by`/`stddev_prev_by`/`&&`) sigue pendiente de confirmar
+#    tal cual contra la consola -- este hallazgo solo corrigió el error
+#    de sintaxis en la última línea, que impedía siquiera intentar correr
+#    el resto.
+#
+# 4) HALLAZGO DEL terraform apply -var deploy_aiops_correlation_alerts=true
+#    (2026-08-30, ya ejecutado, específico de naive_static_threshold): la
+#    query corría sin problema pegada en Metrics Explorer (solo un warning
+#    benigno de conversión Bool->Int), pero la API de creación de
+#    alert policies (invocada por Terraform) SÍ bloqueó con Error 400:
+#    "Ignoring units for operation '>', which is combining two values, the
+#    first with no units and the second with unit '1'. Units need to be
+#    given for neither or both of the inputs to '>'. Units can be added to
+#    the first argument by the `cast_units` function (example
+#    `cast_units(<expression>, "By/s")`) ... Units can be removed by
+#    `cast_units(<expression>, "")`." Es decir: la consola interactiva es
+#    más laxa (solo advierte) que la API de creación de policies (que
+#    rechaza). Causa: `val` (el resultado de `sum(...)`) no tiene unidad,
+#    mientras que el literal `0` sí trae implícitamente la unidad `'1'`
+#    (adimensional) -- `>` exige que ambos lados tengan unidad o ninguno.
+#    Corregido usando exactamente el remedio que la propia API sugirió en
+#    su mensaje de error: `cast_units(val, "1")` iguala la unidad del lado
+#    izquierdo a la del literal antes de comparar. No fue necesario tocar
+#    correlated_degradation/correlated_degradation_data_service porque ahí
+#    ambos lados de cada `>` ya son valores puramente numéricos sin
+#    involucrar un `sum()` sin unidad contra un literal (multiplicación por
+#    100 y `p99` vienen de `div`/`percentile`, no de `sum` crudo).
 # ---------------------------------------------------------------------------
 
 resource "google_project_service" "monitoring" {
@@ -93,12 +139,24 @@ resource "google_monitoring_notification_channel" "aiops_email" {
   }
 }
 
-# --- Señal correlacionada: error_rate anómalo Y latency_p99 > SLO ---------
+# --- Señal correlacionada: error_rate alto Y latency_p99 > SLO -----------
 #
-# MQL: error_rate = ratio de series con status>=500 sobre el total,
-# comparado contra su propia media móvil de 1h + 2 desviaciones estándar
-# (esto ES la banda "baseline + 2σ" calculada explícitamente, no una caja
-# negra). latency_p99 usa el histograma OTel ya expuesto por el Collector.
+# MQL: error_rate = ratio de requests con status=500 sobre el total,
+# comparado contra un umbral ESTÁTICO (var.error_rate_threshold_pct -- ver
+# esa variable en variables.tf para el hallazgo real de por qué no es un
+# baseline dinámico media+2σ). latency_p99 usa el histograma OTel ya
+# expuesto por el Collector.
+#
+# Sintaxis MQL confirmada contra la consola real (2026-08-30, tras 3
+# rondas de errores reales con la versión anterior -- ver historial en
+# variables.tf): el cálculo de error_rate usa EXACTAMENTE el patrón
+# oficial de fan-out confirmado en la cabecera de este archivo
+# (`{ metric A ; metric B } | join | div`, acceso puramente POSICIONAL,
+# sin nombrar columnas para referenciarlas después de un join -- eso fue
+# lo que falló antes con "Unknown function name 'error'"). El `condition`
+# final tampoco lleva ningún argumento después de la expresión booleana
+# (otro error real ya corregido: `| condition ... '1'` no es sintaxis
+# válida, `condition` solo toma el predicado).
 resource "google_monitoring_alert_policy" "correlated_degradation" {
   count        = var.deploy_aiops_correlation_alerts ? 1 : 0
   project      = var.project_id
@@ -107,26 +165,26 @@ resource "google_monitoring_alert_policy" "correlated_degradation" {
 
   # Una sola condition MQL que hace fetch de las dos métricas por separado
   # (fan-out { ; } | join, sintaxis oficial -- ver comentario de cabecera)
-  # y evalúa error_rate fuera de baseline+2σ Y latency_p99 > SLO al mismo
-  # tiempo, DESPUÉS de unir ambas ramas. Antes eran 2 conditions
-  # independientes con combiner AND -- la API de GCP no lo permite para
+  # y evalúa error_rate > umbral Y latency_p99 > SLO al mismo tiempo,
+  # DESPUÉS de unir ambas ramas. Antes eran 2 conditions independientes
+  # con combiner AND -- la API de GCP no lo permite para
   # condition_monitoring_query_language (Error 400 real, ver cabecera).
   conditions {
-    display_name = "error_rate fuera de baseline + 2 sigma Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
+    display_name = "error_rate > ${var.error_rate_threshold_pct}% Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
     condition_monitoring_query_language {
       query    = <<-MQL
         fetch prometheus_target
-        | { metric 'prometheus.googleapis.com/http_requests_total/counter'
-            | filter (resource.namespace == '${var.kubernetes_namespace}')
-            | align rate(1m)
-            | group_by [metric.status], [val: sum(value.http_requests_total)]
-            | { ident
-              | filter metric.status == '500' | group_by [], [error: sum(val)]
-              ; ident
-              | group_by [], [total: sum(val)] }
+        | { { metric 'prometheus.googleapis.com/http_requests_total/counter'
+              | filter (resource.namespace == '${var.kubernetes_namespace}' && metric.status == '500')
+              | align rate(1m)
+              | group_by [], .sum
+            ; metric 'prometheus.googleapis.com/http_requests_total/counter'
+              | filter (resource.namespace == '${var.kubernetes_namespace}')
+              | align rate(1m)
+              | group_by [], .sum }
             | join
-            | value [error_rate: val(0).error / val(1).total * 100]
-            | value [error_anomaly: error_rate > mean_prev_by(1h) + 2 * stddev_prev_by(1h)]
+            | div
+            | value [error_high: val() * 100 > ${var.error_rate_threshold_pct}]
           ; metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
             | filter (resource.namespace == '${var.kubernetes_namespace}')
             | align delta(1m)
@@ -134,7 +192,7 @@ resource "google_monitoring_alert_policy" "correlated_degradation" {
             | group_by [], [p99: percentile(value.http_request_duration_seconds, 99)]
             | value [latency_high: p99 > ${var.latency_p99_slo_ms / 1000.0}] }
         | join
-        | condition val(0).error_anomaly && val(1).latency_high '1'
+        | condition val(0) && val(1)
       MQL
       duration = "180s"
       trigger {
@@ -145,9 +203,11 @@ resource "google_monitoring_alert_policy" "correlated_degradation" {
 
   documentation {
     content = <<-EOT
-      Regla de correlación del Módulo B: error_rate fuera de baseline ± 2σ
-      Y latency_p99 por encima del SLO al mismo tiempo. Esta policy cubre
-      la señal de error HTTP (5xx vistos por service-a). Ver
+      Regla de correlación del Módulo B: error_rate por encima de
+      ${var.error_rate_threshold_pct}% Y latency_p99 por encima del SLO al
+      mismo tiempo (ver variables.tf, error_rate_threshold_pct, para por
+      qué el umbral de error es estático y no un baseline dinámico). Esta
+      policy cubre la señal de error HTTP (5xx vistos por service-a). Ver
       google_monitoring_alert_policy.correlated_degradation_data_service
       más abajo para la segunda vía de error (degradación silenciosa de
       data-service) -- las dos son independientes a propósito, ver el
@@ -203,21 +263,25 @@ resource "google_monitoring_alert_policy" "correlated_degradation_data_service" 
   # (ver su comentario y el de cabecera): 1 sola condition MQL con fan-out
   # { ; } | join en vez de 2 conditions con combiner AND.
   conditions {
-    display_name = "data_service_error_rate fuera de baseline + 2 sigma Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
+    display_name = "data_service_error_rate > ${var.error_rate_threshold_pct}% Y latency_p99 > SLO (${var.latency_p99_slo_ms} ms)"
     condition_monitoring_query_language {
+      # Mismo patrón corregido que correlated_degradation de arriba
+      # (acceso posicional tras join, sin funciones inventadas, umbral
+      # estático en vez de baseline dinámico -- ver esa policy y
+      # variables.tf/error_rate_threshold_pct para el hallazgo completo).
       query    = <<-MQL
         fetch prometheus_target
-        | { metric 'prometheus.googleapis.com/data_service_calls_total/counter'
-            | filter (resource.namespace == '${var.kubernetes_namespace}')
-            | align rate(1m)
-            | group_by [metric.outcome], [val: sum(value.data_service_calls_total)]
-            | { ident
-              | filter metric.outcome != 'success' | group_by [], [error: sum(val)]
-              ; ident
-              | group_by [], [total: sum(val)] }
+        | { { metric 'prometheus.googleapis.com/data_service_calls_total/counter'
+              | filter (resource.namespace == '${var.kubernetes_namespace}' && metric.outcome != 'success')
+              | align rate(1m)
+              | group_by [], .sum
+            ; metric 'prometheus.googleapis.com/data_service_calls_total/counter'
+              | filter (resource.namespace == '${var.kubernetes_namespace}')
+              | align rate(1m)
+              | group_by [], .sum }
             | join
-            | value [error_rate: val(0).error / val(1).total * 100]
-            | value [error_anomaly: error_rate > mean_prev_by(1h) + 2 * stddev_prev_by(1h)]
+            | div
+            | value [error_high: val() * 100 > ${var.error_rate_threshold_pct}]
           ; metric 'prometheus.googleapis.com/http_request_duration_seconds/histogram'
             | filter (resource.namespace == '${var.kubernetes_namespace}')
             | align delta(1m)
@@ -225,7 +289,7 @@ resource "google_monitoring_alert_policy" "correlated_degradation_data_service" 
             | group_by [], [p99: percentile(value.http_request_duration_seconds, 99)]
             | value [latency_high: p99 > ${var.latency_p99_slo_ms / 1000.0}] }
         | join
-        | condition val(0).error_anomaly && val(1).latency_high '1'
+        | condition val(0) && val(1)
       MQL
       duration = "180s"
       trigger {
@@ -237,9 +301,9 @@ resource "google_monitoring_alert_policy" "correlated_degradation_data_service" 
   documentation {
     content = <<-EOT
       Segunda vía de correlación del Módulo B (ver comentario del recurso
-      para el hallazgo completo): data_service_error_rate fuera de
-      baseline ± 2σ Y latency_p99 por encima del SLO al mismo tiempo.
-      Dispara ante degradación silenciosa de data-service (500/timeout
+      para el hallazgo completo): data_service_error_rate por encima de
+      ${var.error_rate_threshold_pct}% Y latency_p99 por encima del SLO al
+      mismo tiempo. Dispara ante degradación silenciosa de data-service (500/timeout
       atrapado por service-a, que sigue respondiendo 200), invisible para
       correlated_degradation (que solo mira status HTTP de service-a).
 
@@ -277,7 +341,7 @@ resource "google_monitoring_alert_policy" "naive_static_threshold" {
         | filter (resource.namespace == '${var.kubernetes_namespace}' && metric.status == '500')
         | align rate(1m)
         | group_by [], [val: sum(value.http_requests_total)]
-        | condition val > 0 '1'
+        | condition cast_units(val, "1") > 0
       MQL
       duration = "60s"
       trigger {

@@ -185,6 +185,38 @@ variable "latency_p99_slo_ms" {
   default     = 300
 }
 
+variable "error_rate_threshold_pct" {
+  description = <<-EOT
+    Umbral ESTÁTICO de error_rate (%) para las policies de correlación
+    (correlated_degradation, correlated_degradation_data_service) en
+    iac/terraform/gcp/monitoring_aiops.tf.
+
+    Hallazgo real (2026-08-30, Runbook 2 Paso 1): el diseño original
+    calculaba un baseline DINÁMICO (media + 2*desviación estándar sobre
+    una ventana deslizante) vía funciones MQL `mean_prev_by`/
+    `stddev_prev_by` -- confirmado en la consola real de Metrics Explorer
+    que esas funciones NO EXISTEN en MQL ("Unknown function name
+    'mean_prev_by'"). Se intentó confirmar la sintaxis correcta
+    (candidatos reales encontrados en la documentación oficial:
+    `sliding(duración)` como especificador de ventana,
+    agregadores `mean`/`stddev`/`variance`, operador `filter_ratio`) pero
+    la página de referencia de MQL se trunca en cada consulta y no fue
+    posible confirmar la combinación exacta sin seguir adivinando contra
+    la consola real -- decisión explícita del usuario: simplificar a un
+    umbral estático en vez de seguir iterando a ciegas.
+
+    Esto SÍ deja constancia honesta en el reporte de una limitación real
+    (el baseline dinámico de MQL no se pudo implementar con la evidencia
+    disponible), pero conserva lo más importante del Módulo B: la alerta
+    sigue siendo una correlación real con AND entre error_rate y
+    latency_p99 (ver el `join`/`div`/`condition` de monitoring_aiops.tf),
+    que sigue siendo estructuralmente mejor que `naive_static_threshold`
+    (que ni siquiera mira la tasa de error, solo la presencia de un 500).
+  EOT
+  type        = number
+  default     = 5
+}
+
 variable "alert_notification_email" {
   description = "Email suscrito a las alertas de Cloud Monitoring (Módulo B). Vacío por defecto."
   type        = string
