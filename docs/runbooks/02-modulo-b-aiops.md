@@ -4,6 +4,30 @@
 > en el Paso 2 y Paso 3 quedan documentados como diseño de referencia, no
 > se ejecutan.
 
+## Paso 0 -- Prerrequisito real descubierto en este laboratorio: habilitar el scrape de Managed Prometheus
+
+Hallazgo real (2026-08-30): con el clúster, las 3 apps y hasta 1286
+requests reales de tráfico ya corridos, la query MQL de abajo seguía
+devolviendo `Could not find a metric named
+'prometheus.googleapis.com/http_requests_total/counter'` y "No hay datos
+disponibles" en la consola. Causa raíz: Google Managed Prometheus viene
+habilitado por defecto en el clúster (confirmado con `kubectl get crd |
+grep monitoring.googleapis.com`), pero sin un recurso `PodMonitoring` que
+le diga qué scrapear, nunca colecta nada -- no importa cuánto tráfico se
+genere. Ver `iac/gmp/README.md` para el detalle completo.
+
+Antes de seguir con el Paso 1, aplica esto UNA VEZ (ya viene con el
+`terraform apply` de Runbook 1, que ahora nombra el puerto 8889 del
+otel-collector):
+
+```bash
+kubectl apply -f iac/gmp/podmonitoring-otel-collector.yaml
+```
+
+Dale ~2-3 min después de generar tráfico antes de validar en consola (el
+scraping directo es más rápido que el delay de ~10 min de las métricas
+basadas en logs, pero no es instantáneo).
+
 ## Paso 1 -- Validar el MQL de GCP contra datos reales ANTES de aplicar la alerta
 
 Las 3 alert policies que dependen de métricas de aplicación
@@ -13,13 +37,22 @@ Las 3 alert policies que dependen de métricas de aplicación
 forzar este paso -- el primer `terraform apply` real (2026-08-29) confirmó
 que sin esto fallan con "Could not find a metric": Google Managed
 Prometheus no registra el descriptor de una métrica hasta que llega el
-primer dato real. Además, las 2 policies de correlación ahora son UNA sola
+primer dato real (y, como se documentó arriba, hasta que existe el
+`PodMonitoring`). Además, las 2 policies de correlación ahora son UNA sola
 consulta MQL cada una (la API de GCP no permite más de 1 condition por
 policy cuando el tipo es `condition_monitoring_query_language` -- ver la
 cabecera de `iac/terraform/gcp/monitoring_aiops.tf`), escrita combinando
 ambas señales con la sintaxis oficial de fan-out `{ ; } | join`, pero
 **sin poder probarla contra una consola real todavía** -- confírmalo aquí
 antes de confiar en ella.
+
+Nota (2026-08-30): MQL ya no es el modo recomendado por Google para
+paneles/alertas nuevas (soporte de escritura de queries terminado en
+julio 2025, ver banner de la propia consola) -- PromQL es lo que
+recomiendan ahora. Las policies de este repo siguen en MQL porque ya
+estaban escritas y crearlas vía Terraform/API sigue funcionando sin
+problema; se documenta como riesgo conocido de obsolescencia a futuro,
+no como algo que haya que migrar para esta entrega.
 
 Con el clúster y las 3 apps ya desplegados (Runbook 1, con
 `deploy_aiops_correlation_alerts` en su default `false`) y tráfico real

@@ -616,6 +616,32 @@ resource "kubernetes_deployment" "otel_collector" {
             container_port = 4318
           }
 
+          # Hallazgo real (2026-08-30): Google Managed Prometheus SÍ viene
+          # habilitado por defecto en este clúster (confirmado con
+          # `kubectl get crd | grep monitoring.googleapis.com` -- el CRD
+          # `podmonitorings.monitoring.googleapis.com` ya existe), pero sin
+          # un recurso `PodMonitoring` que le diga qué scrapear, nunca
+          # colecta nada -- confirmado en la consola real: la query MQL
+          # `fetch prometheus_target | metric
+          # 'prometheus.googleapis.com/http_requests_total/counter'`
+          # devolvía "Could not find a metric" pese a tráfico real ya
+          # corrido. El manifiesto `PodMonitoring`
+          # (iac/gmp/podmonitoring-otel-collector.yaml -- YAML aparte +
+          # `kubectl apply`, NO gestionado por Terraform, mismo patrón que
+          # iac/istio/ y por la misma razón: el recurso
+          # `kubernetes_manifest` del provider sigue en beta y es conocido
+          # por ser frágil con el schema de CRDs, el tipo de sorpresa que
+          # ya tuvimos hoy con el bug de "Unexpected Identity Change" de
+          # kubernetes_deployment) necesita un puerto de contenedor CON
+          # NOMBRE para apuntarle -- un puerto numérico no es válido para
+          # `PodMonitoring.spec.endpoints[].port` (documentación oficial de
+          # GKE/Managed Prometheus). Puerto 8889 = el que expone el
+          # exporter `prometheus` de collector-config.gcp.yaml.
+          port {
+            name           = "prom-metrics"
+            container_port = 8889
+          }
+
           resources {
             requests = {
               cpu    = "100m"
@@ -664,6 +690,16 @@ resource "kubernetes_service" "otel_collector" {
       name        = "otlp-http"
       port        = 4318
       target_port = 4318
+    }
+
+    # No es requerido por PodMonitoring (que scrapea el pod directamente,
+    # no el Service), pero se expone por consistencia con el resto de
+    # puertos del collector y para poder hacer `kubectl port-forward` a
+    # este puerto si hace falta depurar el endpoint /metrics a mano.
+    port {
+      name        = "prom-metrics"
+      port        = 8889
+      target_port = 8889
     }
   }
 }

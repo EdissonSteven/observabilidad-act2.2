@@ -1,0 +1,22 @@
+# Le dice a Google Managed Prometheus (habilitado por defecto en este
+# clúster, ver iac/gmp/README.md) que scrapee el endpoint Prometheus del
+# otel-collector -- sin esto, las métricas de aplicación
+# (http_requests_total, data_service_calls_total,
+# http_request_duration_seconds) usadas por las alert policies de
+# iac/terraform/gcp/monitoring_aiops.tf nunca existen en Cloud Monitoring,
+# sin importar cuánto tráfico se genere (hallazgo real, confirmado en
+# consola: "Could not find a metric" pese a 1286 requests reales ya
+# corridos).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: otel-collector
+  namespace: observability-lab
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  endpoints:
+    - port: prom-metrics # puerto de contenedor CON NOMBRE (8889) -- ver main.tf, kubernetes_deployment.otel_collector
+      interval: 30s
+      path: /metrics # path fijo del exporter `prometheus` del OTel Collector -- no es configurable

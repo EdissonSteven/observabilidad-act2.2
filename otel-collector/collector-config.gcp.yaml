@@ -18,9 +18,22 @@
 #     quitó ese exporter -- Cloud Trace ya cubre la evidencia de traza de
 #     3 saltos que pide el Módulo A (ver docs/runbooks/01-modulo-a-
 #     arquitectura.md, que ya acepta Cloud Trace o Jaeger como evidencia).
-#   - Metrics -> Prometheus scraping endpoint (consumido por el Prometheus
-#     del clúster o por Google Managed Prometheus) y Cloud Monitoring
-#     (exporter googlecloud).
+#   - Metrics -> SOLO Prometheus scraping endpoint (puerto 8889,
+#     consumido por Google Managed Prometheus vía el `PodMonitoring` de
+#     iac/gmp/podmonitoring-otel-collector.yaml). Corrección real
+#     (2026-08-30): esta variante originalmente exportaba métricas
+#     TAMBIÉN por `googlecloud` (push directo a Cloud Monitoring), pero
+#     ese exporter las escribe bajo el prefijo `workload.googleapis.com/*`
+#     (confirmado contra el README del exporter googlecloud de
+#     opentelemetry-collector-contrib), mientras que las 3 alert policies
+#     de `iac/terraform/gcp/monitoring_aiops.tf` consultan
+#     `prometheus.googleapis.com/*` -- el namespace que solo produce el
+#     scraping de Managed Prometheus. Tener ambos exporters activos no
+#     arreglaba nada (la métrica que sí importa seguía sin existir) y
+#     además duplicaba la ingestión de métricas custom bajo dos nombres
+#     distintos, con su costo. Se deja solo `prometheus`; nada más del
+#     Collector necesitaba el exporter `googlecloud` para métricas
+#     (traces y logs siguen usándolo, sin cambios).
 #   - Logs -> Cloud Logging, usando Workload Identity del Service Account
 #     del pod (sin credenciales embebidas en este archivo -- ver la
 #     Kubernetes ServiceAccount "otel-collector" y el
@@ -92,7 +105,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, resource, resourcedetection, batch]
-      exporters: [prometheus, googlecloud]
+      exporters: [prometheus]
 
     logs:
       receivers: [otlp]
