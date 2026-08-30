@@ -15,3 +15,14 @@ terraform.tfvars
 
 # Reporte exportado (se genera localmente, no se versiona el binario)
 docs/reporte-tecnico.pdf
+
+# Distribución de Istio descargada con `curl -L https://istio.io/downloadIstio | sh -`
+# NO se versiona: son ~100 MB incluyendo el binario istioctl, y se re-descarga
+# con un comando (ver iac/istio/README.md). Quedó dentro de iac/terraform/gcp/
+# por haberse descomprimido ahí durante el despliegue.
+istio-*/
+
+# Salidas crudas de los experimentos en la raíz. La evidencia que SÍ se
+# conserva vive organizada en docs/evidencia/<modulo>/.
+/*.csv
+/*.log

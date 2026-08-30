@@ -1,0 +1,36 @@
+== Identidad y proyecto ==
+  [OK]   Proyecto observabilidad-lab-507021 accesible como edissonbuga@unisabana.edu.co
+
+== Facturación (Cloud SQL/GKE fallan sin esto) ==
+  [OK]   Facturación habilitada
+
+== Organización del PROYECTO (requerida por Security Command Center) ==
+  [OK]   El proyecto NO pertenece a ninguna organización (proyecto huérfano) -- Security Command Center NO es aplicable: se activa a nivel de organización y no hay ninguna de la que este proyecto cuelgue. El Módulo C usa Firewall Rule Logging + log-based metrics como sustituto funcional (network_security.tf), documentado como brecha explícita en docs/madurez-observabilidad.md
+     (informativo: la cuenta ve 1 organización(es); irrelevante para SCC si el proyecto no cuelga de ninguna)
+
+== Cloud Resource Manager API (bootstrap obligatorio, bloqueante) ==
+  [OK]   cloudresourcemanager.googleapis.com ya habilitada
+
+== APIs necesarias (se habilitan solas vía google_project_service en el apply, esto solo informa el estado actual) ==
+  [OK]   container.googleapis.com ya habilitada
+  [OK]   compute.googleapis.com ya habilitada
+  [OK]   artifactregistry.googleapis.com ya habilitada
+  [OK]   iam.googleapis.com ya habilitada
+  [OK]   sqladmin.googleapis.com ya habilitada
+  [OK]   servicenetworking.googleapis.com ya habilitada
+  [OK]   monitoring.googleapis.com ya habilitada
+  [OK]   logging.googleapis.com ya habilitada
+  [OK]   secretmanager.googleapis.com ya habilitada
+
+== Cuotas relevantes (GKE + Cloud SQL consumen IP privada/peering) ==
+     {'limit': 4.0, 'metric': 'IN_USE_ADDRESSES', 'usage': 1.0}
+     {'limit': 12.0, 'metric': 'CPUS_ALL_REGIONS', 'usage': 8.0}
+
+== Permisos del usuario actual (rol efectivo en el proyecto) ==
+     ROLE: roles/owner
+
+==================================================================
+RESULTADO: 13 OK, 0 advertencias, 0 fallas
+==================================================================
+Sin fallas bloqueantes. Siguiente paso:
+  cd iac/terraform/gcp && terraform init && terraform plan -var project_id=observabilidad-lab-507021
