@@ -7,38 +7,39 @@
 # ---------------------------------------------------------------------------
 # Los Experimentos 1 y 2 se ejecutaron contra GKE real y NINGUNO logró
 # disparar las policies de correlación, pese a que el fallo inyectado era
-# real y medible en los CSV de load_gen.py. La causa NO fue un bug de
-# configuración: es estructural, y se confirmó leyendo la MQL aplicada
-# (iac/terraform/gcp/monitoring_aiops.tf) contra los umbrales reales de
-# iac/terraform/gcp/variables.tf.
+# real y medible en los CSV de load_gen.py. Hubo varias causas encadenadas
+# (ver el bloque "HALLAZGO 5" de iac/terraform/gcp/monitoring_aiops.tf para
+# la historia completa: mTLS de Istio cortando el scraping, histogram_quantile
+# interpolando sobre un SLO que no coincidía con ninguna frontera de bucket,
+# y rate() devolviendo NaN sin tráfico). Pero una de ellas es ESTRUCTURAL y
+# sobrevive a todas las correcciones, y es la razón de ser de este script.
 #
 # Ambas policies de correlación (`correlated_degradation` y
-# `correlated_degradation_data_service`) terminan en:
+# `correlated_degradation_data_service`) evalúan, en PromQL:
 #
-#     | join
-#     | condition val(0) && val(1)
+#     (error_rate > umbral) and (fraccion_bajo_SLO < 0.99)
 #
-# es decir, exigen `error_high` Y `latency_high` verdaderos AL MISMO TIEMPO,
-# sostenidos durante `duration = "180s"`. Los umbrales reales son:
+# es decir, exigen señal de error Y señal de latencia AL MISMO TIEMPO. Los
+# umbrales reales (ver variables.tf) son:
 #
-#   - var.latency_p99_slo_ms      = 300   -> latency_high := p99 > 0.3 s
-#   - var.error_rate_threshold_pct = 5    -> error_high   := error_rate > 5 %
+#   - var.latency_p99_slo_ms       = 250 -> bucket le="0.25"; se exige que
+#                                           MENOS del 99 % de las peticiones
+#                                           esté por debajo de 250 ms
+#   - var.error_rate_threshold_pct = 5   -> error_rate > 5 %
 #
 # Y cada experimento de un solo síntoma produce solo UNA de las dos señales:
 #
 #   * Experimento 1 (h4, latencia 200 ms en service-b): sube la latencia
 #     pero no genera errores -- service-a llama a service-b con un timeout
 #     httpx de 5 s (services/service-a/app/main.py), muy por encima de los
-#     200 ms inyectados, así que ninguna petición falla. `error_high` es
-#     siempre false -> el AND nunca se cumple. Además 200 ms sobre el
-#     baseline deja el p99 rozando los 300 ms, sin margen para sostenerlo
-#     180 s seguidos.
+#     200 ms inyectados, así que ninguna petición falla. La rama de error es
+#     siempre falsa -> el AND nunca se cumple.
 #
 #   * Experimento 2 (h5, error rate en data-service): la inyección de fallo
 #     de data-service es un *fast-fail* -- devuelve 500 ANTES de tocar la
 #     base de datos y sin retardo artificial, o sea que es MÁS RÁPIDA que
-#     una respuesta normal. Sube `error_high` pero NO sube (incluso baja)
-#     el p99 -> `latency_high` es false -> el AND tampoco se cumple.
+#     una respuesta normal. Sube la rama de error pero NO sube (incluso baja)
+#     la latencia -> la rama de latencia es falsa -> el AND tampoco se cumple.
 #
 # Conclusión honesta: un fallo de UN SOLO síntoma no puede activar una regla
 # de correlación de DOS síntomas. Eso no es un defecto de la regla -- es
@@ -80,10 +81,11 @@
 # Argumentos:
 #   1) project_id   (requerido) proyecto de GCP
 #   2) fault_s      duración del fault en segundos (default 360). DEBE ser
-#                   holgadamente mayor que los 180 s de `duration` de la
-#                   condition MÁS el retardo de alineación/ingesta (~60-120 s)
-#                   MÁS el overhead de los rollouts de kubectl set env
-#                   (~40-60 s por deployment). 360 s es el mínimo prudente.
+#                   holgadamente mayor que los 60 s de `duration` de la
+#                   condition MÁS la ventana rate[2m] que la alimenta MÁS el
+#                   retardo de ingesta (~30-60 s) MÁS el overhead de los
+#                   rollouts de kubectl set env (~40-60 s por deployment).
+#                   360 s deja margen cómodo para medir un MTTD limpio.
 #   3) warmup_s     tráfico limpio antes del fault (default 60). Con umbral
 #                   estático ya no hace falta un baseline largo -- ver la
 #                   corrección del Paso 0 en docs/runbooks/04-modulo-d-chaos.md.
@@ -101,10 +103,18 @@ NAMESPACE="${4:-observability-lab}"
 LOAD_URL="${5:-http://localhost:8000/orders/ord-1002}"
 
 # Márgenes holgados sobre los umbrales reales de variables.tf:
-#   500 ms inyectados vs SLO de 300 ms  -> latency_high con margen
-#   30 % de error rate vs umbral de 5 % -> error_high con margen
+#   500 ms inyectados vs SLO de 250 ms  -> TODAS las peticiones se van por
+#     encima del bucket le=0.25, así que la fracción se desploma de ~1.0 a
+#     ~0 (umbral: < 0.99). Sin ambigüedad.
+#   30 % de error rate vs umbral de 5 %  -> 6x el umbral.
 export LATENCY_MS="${LATENCY_MS:-500}"
 export ERROR_RATE="${ERROR_RATE:-0.30}"
+
+# Deben coincidir con iac/terraform/gcp/variables.tf:
+#   SLO_LE            = latency_p99_slo_ms / 1000  (frontera de bucket real)
+#   ERR_THRESHOLD_PCT = error_rate_threshold_pct
+SLO_LE="${SLO_LE:-0.25}"
+ERR_THRESHOLD_PCT="${ERR_THRESHOLD_PCT:-5}"
 
 for bin in kubectl gcloud jq python3; do
   command -v "$bin" >/dev/null 2>&1 || { echo "falta '$bin' en el PATH" >&2; exit 1; }
@@ -121,12 +131,17 @@ PROM_API="https://monitoring.googleapis.com/v1/projects/${PROJECT_ID}/location/g
 # una sola vez en vez de en cada iteración del sondeo (que sería lento).
 ACCESS_TOKEN="$(gcloud auth print-access-token)"
 
-# Estas dos consultas son la traducción a PromQL de las dos ramas de la MQL
-# de las policies de correlación (ver monitoring_aiops.tf): misma métrica,
-# mismo filtro de namespace, misma ventana de rate(1m).
-Q_ERROR_RATE="100 * sum(rate(data_service_calls_total{namespace=\"${NAMESPACE}\",outcome!=\"success\"}[1m])) / sum(rate(data_service_calls_total{namespace=\"${NAMESPACE}\"}[1m]))"
-Q_P99="histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{namespace=\"${NAMESPACE}\"}[1m])) by (le))"
-Q_HTTP_ERR_RATE="100 * sum(rate(http_requests_total{namespace=\"${NAMESPACE}\",status=\"500\"}[1m])) / sum(rate(http_requests_total{namespace=\"${NAMESPACE}\"}[1m]))"
+# Ventana [2m] y forma EXACTA de las consultas de las alert policies
+# (iac/terraform/gcp/monitoring_aiops.tf) -- a propósito: lo que este script
+# imprime es literalmente lo que la policy está evaluando, así que si las dos
+# condiciones salen en SI y aun así no dispara, el problema ya no es el
+# experimento sino la policy.
+Q_ERROR_RATE="100 * sum(rate(data_service_calls_total{namespace=\"${NAMESPACE}\",outcome!=\"success\"}[2m])) / sum(rate(data_service_calls_total{namespace=\"${NAMESPACE}\"}[2m]))"
+# Fracción de peticiones bajo el bucket del SLO (250ms). < 0.99 equivale a
+# "p99 > 250ms", pero es un conteo exacto sin la interpolación de
+# histogram_quantile -- ver hallazgo 5 en monitoring_aiops.tf.
+Q_LAT_FRAC="sum(rate(http_request_duration_seconds_bucket{namespace=\"${NAMESPACE}\",le=\"${SLO_LE}\"}[2m])) / sum(rate(http_request_duration_seconds_count{namespace=\"${NAMESPACE}\"}[2m]))"
+Q_HTTP_ERR_RATE="100 * sum(rate(http_requests_total{namespace=\"${NAMESPACE}\",status=\"500\"}[2m])) / sum(rate(http_requests_total{namespace=\"${NAMESPACE}\"}[2m]))"
 
 promql() {
   # Devuelve el valor escalar de una consulta instantánea, o "NODATA".
@@ -138,26 +153,25 @@ promql() {
 }
 
 probe_once() {
-  local tag="$1" ts err p99 httperr eflag lflag
+  local tag="$1" ts err latfrac httperr eflag lflag
   ts=$(date -u +%H:%M:%SZ)
   err=$(promql "$Q_ERROR_RATE")
-  p99=$(promql "$Q_P99")
+  latfrac=$(promql "$Q_LAT_FRAC")
   httperr=$(promql "$Q_HTTP_ERR_RATE")
-  # Réplica exacta de las dos condiciones de la MQL, para ver cuál falta.
+  # Réplica exacta de las dos condiciones de la policy, para ver cuál falta.
+  # NaN/VACIO (sin tráfico, denominador 0) cuentan como "no" -- igual que en
+  # PromQL, donde toda comparación con NaN es falsa.
   eflag=$(python3 -c "
-import sys
-v='$err'
-try: print('SI' if float(v) > 5 else 'no')
-except Exception: print('?')
+try: print('SI' if float('$err') > ${ERR_THRESHOLD_PCT} else 'no')
+except Exception: print('-')
 ")
   lflag=$(python3 -c "
-import sys
-v='$p99'
-try: print('SI' if float(v) > 0.3 else 'no')
-except Exception: print('?')
+try: print('SI' if float('$latfrac') < 0.99 else 'no')
+except Exception: print('-')
 ")
-  printf '%s [%s] ds_error_rate=%s%% (>5%%? %s)  p99=%ss (>0.3s? %s)  http_5xx_rate=%s%%\n' \
-    "$ts" "$tag" "$err" "$eflag" "$p99" "$lflag" "$httperr" | tee -a "$PROBE_LOG"
+  printf '%s [%s] ds_error=%s%% (>%s%%? %s)  frac_bajo_%ss=%s (<0.99? %s)  http_5xx=%s%%\n' \
+    "$ts" "$tag" "$err" "$ERR_THRESHOLD_PCT" "$eflag" "$SLO_LE" "$latfrac" "$lflag" "$httperr" \
+    | tee -a "$PROBE_LOG"
 }
 
 echo "=============================================================="
@@ -165,10 +179,10 @@ echo " Experimento 3 -- degradación CORRELACIONADA (latencia + errores)"
 echo "=============================================================="
 echo " project_id    : $PROJECT_ID"
 echo " namespace     : $NAMESPACE"
-echo " latencia      : ${LATENCY_MS} ms en service-b   (SLO p99 = 300 ms)"
-echo " error rate    : ${ERROR_RATE} en data-service   (umbral = 5 %)"
+echo " latencia      : ${LATENCY_MS} ms en service-b   (SLO = bucket le=${SLO_LE}s)"
+echo " error rate    : ${ERROR_RATE} en data-service   (umbral = ${ERR_THRESHOLD_PCT} %)"
 echo " warm-up       : ${WARMUP_SECONDS}s"
-echo " fault         : ${FAULT_DURATION}s  (condition duration = 180s)"
+echo " fault         : ${FAULT_DURATION}s  (condition duration = 60s)"
 echo " CSV load_gen  : $OUT_CSV"
 echo " log de sondeo : $PROBE_LOG"
 echo "=============================================================="
