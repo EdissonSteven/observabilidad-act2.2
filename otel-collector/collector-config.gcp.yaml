@@ -6,11 +6,26 @@
 # Diferencias frente a collector-config.local.yaml:
 #   - resourcedetection agrega automáticamente project_id, zona y nombre de
 #     nodo del pod GKE a cada señal.
-#   - Traces -> Jaeger (desplegado como Deployment en el mismo namespace).
+#   - Traces -> Cloud Trace (exporter googlecloud). Corrección real
+#     (2026-08-30): esta variante originalmente exportaba también a
+#     `otlp/jaeger` en `jaeger.observability.svc.cluster.local:4317`, pero
+#     ningún Jaeger se despliega en el clúster GKE (iac/terraform/gcp/
+#     main.tf no tiene ese recurso -- Jaeger solo existe en el stack local
+#     de docker-compose) y el namespace tampoco coincidía (`observability`
+#     vs. el real `observability-lab`/var.kubernetes_namespace). No
+#     tumbaba el pod (un exporter gRPC no exige que el endpoint responda
+#     al arrancar), pero reintentaría para siempre sin nunca lograrlo. Se
+#     quitó ese exporter -- Cloud Trace ya cubre la evidencia de traza de
+#     3 saltos que pide el Módulo A (ver docs/runbooks/01-modulo-a-
+#     arquitectura.md, que ya acepta Cloud Trace o Jaeger como evidencia).
 #   - Metrics -> Prometheus scraping endpoint (consumido por el Prometheus
-#     del clúster o por Google Managed Prometheus).
+#     del clúster o por Google Managed Prometheus) y Cloud Monitoring
+#     (exporter googlecloud).
 #   - Logs -> Cloud Logging, usando Workload Identity del Service Account
-#     del pod (sin credenciales embebidas en este archivo).
+#     del pod (sin credenciales embebidas en este archivo -- ver la
+#     Kubernetes ServiceAccount "otel-collector" y el
+#     google_service_account_iam_member correspondiente en
+#     iac/terraform/gcp/main.tf).
 
 extensions:
   health_check:
@@ -55,11 +70,6 @@ processors:
     send_batch_size: 1024
 
 exporters:
-  otlp/jaeger:
-    endpoint: jaeger.observability.svc.cluster.local:4317
-    tls:
-      insecure: true
-
   prometheus:
     endpoint: 0.0.0.0:8889
     resource_to_telemetry_conversion:
@@ -77,7 +87,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resource, resourcedetection, filter/health, batch]
-      exporters: [otlp/jaeger, googlecloud]
+      exporters: [googlecloud]
 
     metrics:
       receivers: [otlp]

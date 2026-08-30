@@ -99,6 +99,53 @@ resource "google_project_iam_member" "gke_nodes_artifact_reader" {
 }
 
 # ---------------------------------------------------------------------------
+# Workload Identity para el otel-collector -- SIN esto, el exporter
+# `googlecloud` (metrics/traces/logs a Cloud Monitoring/Trace/Logging en
+# otel-collector/collector-config.gcp.yaml) no tiene con qué autenticarse:
+# el clúster ya tiene workload_identity_config habilitado y los nodos usan
+# `workload_metadata_config { mode = "GKE_METADATA" }`, lo que EXIGE que
+# cada pod use una Kubernetes ServiceAccount vinculada a una cuenta de
+# servicio de GCP -- ya no basta con los oauth_scopes del nodo. Sin este
+# bloque, el collector arrancaría (una vez resuelto el crash de env vars
+# de abajo) pero el exporter googlecloud fallaría en silencio con 403
+# PermissionDenied, y NINGUNA métrica de las apps llegaría nunca a Cloud
+# Monitoring -- bloqueando de raíz las 3 alert policies de AIOps
+# (monitoring_aiops.tf, var.deploy_aiops_correlation_alerts) sin importar
+# cuánto tráfico se genere después.
+# ---------------------------------------------------------------------------
+
+resource "google_service_account" "otel_collector" {
+  account_id   = "${var.cluster_name}-otel-collector"
+  display_name = "otel-collector Workload Identity SA (${var.cluster_name})"
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_project_iam_member" "otel_collector_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.otel_collector.email}"
+}
+
+resource "google_project_iam_member" "otel_collector_logging" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.otel_collector.email}"
+}
+
+resource "google_project_iam_member" "otel_collector_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.otel_collector.email}"
+}
+
+resource "google_service_account_iam_member" "otel_collector_workload_identity" {
+  service_account_id = google_service_account.otel_collector.name
+  role                = "roles/iam.workloadIdentityUser"
+  member              = "serviceAccount:${var.project_id}.svc.id.goog[${var.kubernetes_namespace}/otel-collector]"
+}
+
+# ---------------------------------------------------------------------------
 # GKE cluster
 #
 # `location = var.zone` (una ZONA, no var.region) a propósito -- ver el
@@ -499,6 +546,16 @@ resource "kubernetes_config_map" "otel_collector_config" {
   }
 }
 
+resource "kubernetes_service_account" "otel_collector" {
+  metadata {
+    name      = "otel-collector"
+    namespace = kubernetes_namespace.app.metadata[0].name
+    annotations = {
+      "iam.gke.io/gcp-service-account" = google_service_account.otel_collector.email
+    }
+  }
+}
+
 resource "kubernetes_deployment" "otel_collector" {
   metadata {
     name      = "otel-collector"
@@ -519,10 +576,32 @@ resource "kubernetes_deployment" "otel_collector" {
       }
 
       spec {
+        service_account_name = kubernetes_service_account.otel_collector.metadata[0].name
+
         container {
           name  = "otel-collector"
           image = var.otel_collector_image
           args  = ["--config=/etc/otel/collector-config.gcp.yaml"]
+
+          # Hallazgo real (2026-08-30): sin estas 2 env vars el pod entraba
+          # en CrashLoopBackOff -- collector-config.gcp.yaml referencia
+          # ${env:ENVIRONMENT} y ${env:GCP_PROJECT_ID}; si no existen, el
+          # provider de env vars del Collector (v0.103.0) las quita por
+          # completo del YAML resuelto en vez de dejarlas vacías, y el
+          # processor "resource" queda sin su campo "value" obligatorio:
+          # "Error: failed to build pipelines: ... error creating AttrProc.
+          # Either field 'value', 'from_attribute' or 'from_context'
+          # setting must be specified for 0-th action". Mismo patrón que
+          # ya usa docker-compose.yaml (ENVIRONMENT=local) y
+          # iac/terraform/aws/main.tf (ENVIRONMENT=aws-academy).
+          env {
+            name  = "ENVIRONMENT"
+            value = "gcp-lab"
+          }
+          env {
+            name  = "GCP_PROJECT_ID"
+            value = var.project_id
+          }
 
           port {
             container_port = 4317
