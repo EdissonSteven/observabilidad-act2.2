@@ -49,10 +49,23 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   reserved_peering_ranges = [google_compute_global_address.private_ip_range.name]
 }
 
+# Hallazgo real (2026-08-30): con el charset especial original
+# ("!#$%&*()-_=+[]{}<>:?") esta contraseña se embebe sin URL-encode en el
+# DSN "postgresql://app:<password>@host:5432/db" (ver
+# google_secret_manager_secret_version.customers_database_url más abajo y
+# kubernetes_secret.customers_database_url en data_service.tf) -- si al
+# azar sale un "[", "]" o ":" en la contraseña, `urlparse()` en
+# services/data-service/app/db.py lo interpreta como el inicio/fin de un
+# host IPv6 y revienta con "ValueError: Invalid IPv6 URL" al arrancar
+# (CrashLoopBackOff real observado en este laboratorio). Se restringe el
+# charset especial a los caracteres "unreserved" de RFC 3986 (nunca
+# necesitan escape en NINGUNA parte de una URL) en vez de URL-encodear la
+# contraseña en cada lugar donde se arma el DSN (más simple y sin riesgo
+# de que Python la decodifique distinto a como Terraform la codificó).
 resource "random_password" "cloudsql_customers" {
   length           = 24
   special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  override_special = "-_.~"
 }
 
 resource "google_sql_database_instance" "customers" {

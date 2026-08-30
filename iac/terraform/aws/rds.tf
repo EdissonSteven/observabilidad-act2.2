@@ -67,11 +67,19 @@ resource "aws_db_subnet_group" "customers" {
   tags = { Name = "${var.project_name}-customers-subnets" }
 }
 
+# Mismo hallazgo real que en iac/terraform/gcp/cloudsql.tf
+# (random_password.cloudsql_customers, 2026-08-30), aplicado aquí por
+# consistencia aunque este módulo AWS no se ejecute en esta entrega: el
+# charset especial original podía generar un DSN
+# "postgresql://app:<password>@host:5432/db" que `urlparse()` en
+# services/data-service/app/db.py no puede parsear si sale un "[", "]" o
+# ":" al azar ("ValueError: Invalid IPv6 URL", reproducido en GCP). Se
+# restringe a los caracteres "unreserved" de RFC 3986.
 resource "random_password" "rds_customers" {
   count            = var.deploy_rds ? 1 : 0
   length           = 24
   special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  override_special = "-_.~"
 }
 
 resource "aws_db_instance" "customers" {
