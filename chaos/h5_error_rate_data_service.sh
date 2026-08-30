@@ -15,7 +15,11 @@ set -euo pipefail
 
 TARGET="${1:?target requerido: local|gke|ecs}"
 DURATION="${2:-40}"
-ERROR_RATE="0.10"
+# Sobrescribible por variable de entorno (ej. ERROR_RATE=0.30 ./chaos/h5_...).
+# El umbral de las policies de correlación es 5% (var.error_rate_threshold_pct),
+# así que 0.10 ya lo dobla; para el experimento combinado se usa 0.30 para
+# tener margen holgado incluso si parte del tráfico no llega a data-service.
+ERROR_RATE="${ERROR_RATE:-0.10}"
 
 now_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 

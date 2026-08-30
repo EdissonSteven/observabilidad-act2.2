@@ -26,7 +26,14 @@ set -euo pipefail
 MODE="${1:?modo requerido: tc|env}"
 TARGET="${2:?target requerido: local|gke|ecs}"
 DURATION="${3:-40}"
-LATENCY_MS=200
+# Sobrescribible por variable de entorno (ej. LATENCY_MS=500 ./chaos/h4_...).
+# Hallazgo real (2026-08-30): con el SLO de latencia p99 en 300ms
+# (var.latency_p99_slo_ms de iac/terraform/gcp/variables.tf), inyectar solo
+# 200ms deja el p99 resultante justo en el borde del umbral -- insuficiente
+# para que la condition `latency_high` de las policies de correlación se
+# mantenga true los 180s que exige su `duration`. Para el experimento
+# combinado (chaos/run_experimento_d3_combinado.sh) se usa 500ms.
+LATENCY_MS="${LATENCY_MS:-200}"
 
 now_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
