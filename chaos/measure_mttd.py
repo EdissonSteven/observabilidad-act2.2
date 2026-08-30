@@ -22,9 +22,26 @@ el experimento:
 
   gcp    -- Cloud Monitoring, alert policy
             (`<cluster_name>-correlated-degradation`, ver
-            iac/terraform/gcp/monitoring_aiops.tf). Requiere
-            `google-cloud-monitoring` y credenciales (`gcloud auth
-            application-default login`).
+            iac/terraform/gcp/monitoring_aiops.tf). Usa el comando oficial
+            `gcloud alpha monitoring alerts list` (requiere `gcloud` ya
+            autenticado -- el mismo login que usas para `terraform
+            apply`/`kubectl`, no hace falta configurar nada aparte).
+
+            Hallazgo real (2026-08-30): la versión anterior de esta función
+            intentaba leer el incidente desde Cloud Logging
+            (`jsonPayload.policyUserLabels.display_name` en
+            `cloudmonitoring.googleapis.com%2Falerts`) -- un esquema de
+            campos que NO se pudo confirmar contra documentación oficial
+            (regla del proyecto: nada sin referenciar). Se reemplazó por
+            `gcloud alpha monitoring alerts list`, cuyo formato de salida
+            SÍ está documentado con ejemplo completo, incluyendo el campo
+            `open_time` que este script necesita
+            (https://docs.cloud.google.com/monitoring/alerts/incidents-events)
+            y el filtro `policy.display_name="..."`
+            (https://docs.cloud.google.com/sdk/gcloud/reference/alpha/monitoring/alerts/list).
+            Es un comando `alpha` (puede cambiar sin aviso, según la propia
+            documentación de gcloud) pero es la única vía con esquema de
+            campos verificable para este laboratorio.
 
 Uso:
     python3 chaos/measure_mttd.py --backend aws \
@@ -48,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-id", help="Project ID de GCP (solo backend=gcp).")
     parser.add_argument("--prometheus-url", default="http://localhost:9091", help="Base URL de Prometheus (solo backend=local).")
     parser.add_argument("--alert-name", default="CorrelatedDegradation", help="Nombre de la alerta en las reglas de Prometheus (solo backend=local).")
+    parser.add_argument("--timeout-s", type=int, default=900, help="Máximo tiempo de sondeo antes de rendirse (local/gcp, default 900s=15min) -- evita dejar el script colgado si la alerta nunca dispara.")
     return parser.parse_args()
 
 
@@ -64,11 +82,12 @@ def measure_local(args: argparse.Namespace, fault_start: datetime) -> None:
     # runbook: correr este script EN PARALELO al chaos/h5_*.sh, no después).
     url = f"{args.prometheus_url}/api/v1/alerts"
     print(f"Sondeando {url} cada 2s buscando la alerta '{args.alert_name}' en estado firing...")
-    print("(Ctrl+C para detener si el experimento ya terminó sin disparar -- eso también es un resultado válido para el reporte.)")
+    print(f"(máximo {args.timeout_s}s, luego se rinde solo -- Ctrl+C también sirve si quieres cortar antes.)")
 
     import time
 
-    while True:
+    deadline = time.monotonic() + args.timeout_s
+    while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=5) as resp:
                 data = json.loads(resp.read())
@@ -85,6 +104,8 @@ def measure_local(args: argparse.Namespace, fault_start: datetime) -> None:
                 print(f"fault_start={fault_start.isoformat()} fired_at={fired_at.isoformat()} MTTD={mttd:.1f}s")
                 return
         time.sleep(2)
+
+    print(f"Se agotaron los {args.timeout_s}s de sondeo sin ver la alerta en firing -- resultado igualmente válido para el reporte (la alerta no disparó a tiempo, o nunca disparó).")
 
 
 def measure_aws(args: argparse.Namespace, fault_start: datetime) -> None:
@@ -118,40 +139,64 @@ def measure_aws(args: argparse.Namespace, fault_start: datetime) -> None:
 
 
 def measure_gcp(args: argparse.Namespace, fault_start: datetime) -> None:
-    # La API de Cloud Monitoring para incidentes abiertos es
-    # `AlertPolicyServiceClient` + `NotificationChannelServiceClient` no
-    # exponen directamente el historial de incidentes por policy de forma
-    # simple vía el SDK -- el camino más confiable es Cloud Logging (todo
-    # alert policy que dispara escribe una entrada de log en
-    # `logName="projects/<project>/logs/cloudmonitoring.googleapis.com%2Falerts"`).
-    # Se consulta eso aquí en vez del SDK de Monitoring directamente.
-    from google.cloud import logging as gcp_logging
+    # `gcloud alpha monitoring alerts list` -- comando oficial documentado
+    # (ver el docstring del módulo para las 2 fuentes citadas) que expone
+    # `open_time` por incidente, ya filtrable por `policy.display_name`.
+    # Se invoca vía subprocess (no hay SDK de Python separado para este
+    # comando alpha) usando las credenciales de `gcloud` ya autenticadas en
+    # esta sesión (las mismas de `terraform apply`/`kubectl`).
+    import json
+    import subprocess
+    import time
 
     if not args.project_id:
         sys.exit("--project-id es requerido para backend=gcp")
     if not args.alarm_name:
         sys.exit("--alarm-name es requerido para backend=gcp (display_name de la alert policy)")
 
-    client = gcp_logging.Client(project=args.project_id)
-    filter_str = (
-        'logName="projects/%s/logs/cloudmonitoring.googleapis.com%%2Falerts" '
-        'AND jsonPayload.policyUserLabels.display_name="%s" '
-        'AND jsonPayload.incident.state="open"' % (args.project_id, args.alarm_name)
-    )
-    print(f"Consultando Cloud Logging con filtro:\n{filter_str}\n")
+    filter_expr = f'policy.display_name="{args.alarm_name}" AND state=OPEN'
+    cmd = [
+        "gcloud",
+        "alpha",
+        "monitoring",
+        "alerts",
+        "list",
+        f"--project={args.project_id}",
+        f"--filter={filter_expr}",
+        "--sort-by=open_time",
+        "--format=json",
+    ]
 
-    entries = list(client.list_entries(filter_=filter_str, order_by=gcp_logging.ASCENDING, max_results=20))
-    for entry in entries:
-        started_at = entry.timestamp
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=timezone.utc)
-        if started_at >= fault_start:
-            mttd = (started_at - fault_start).total_seconds()
-            print(f"INCIDENTE ABIERTO: {entry.payload}")
-            print(f"fault_start={fault_start.isoformat()} fired_at={started_at.isoformat()} MTTD={mttd:.1f}s")
-            return
+    print(f"Sondeando incidentes OPEN de '{args.alarm_name}' cada 5s (máximo {args.timeout_s}s)...")
+    print(f"Comando: {' '.join(cmd)}\n")
 
-    print("No se encontró un incidente abierto para esa alert policy en el filtro consultado -- revisa el nombre exacto (display_name) o si la alerta nunca disparó.")
+    deadline = time.monotonic() + args.timeout_s
+    while time.monotonic() < deadline:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"error consultando gcloud: {result.stderr.strip()}", file=sys.stderr)
+            time.sleep(5)
+            continue
+
+        try:
+            incidents = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            incidents = []
+
+        for incident in incidents:
+            open_time_str = incident.get("open_time") or incident.get("openTime")
+            if not open_time_str:
+                continue
+            opened_at = _parse_ts(open_time_str)
+            if opened_at >= fault_start:
+                mttd = (opened_at - fault_start).total_seconds()
+                print(f"INCIDENTE ABIERTO: {incident.get('name')} -- {incident.get('summaryText', '')}")
+                print(f"fault_start={fault_start.isoformat()} fired_at={opened_at.isoformat()} MTTD={mttd:.1f}s")
+                return
+
+        time.sleep(5)
+
+    print(f"Se agotaron los {args.timeout_s}s de sondeo sin ver un incidente OPEN posterior a fault_start -- resultado igualmente válido para el reporte (la alerta no disparó a tiempo, o nunca disparó). Verifica también en Cloud Console -> Monitoring -> Alerting por si acaso.")
 
 
 def main() -> None:

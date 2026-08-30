@@ -22,9 +22,9 @@ problemas ANTES de tocar la nube real:
    de nube (`iac/terraform/gcp/monitoring_aiops.tf`,
    `iac/terraform/aws/cloudwatch_aiops.tf`).
 2. **Baseline envenenado por el propio experimento (metodológico, no de
-   código):** `avg_over_time`/`stddev_over_time` sobre una ventana móvil
-   (30m en Prometheus local, **1h** en la MQL de GCP) se contaminan si el
-   propio fallo inyectado ocupa una fracción grande de esa ventana --el
+   código) -- SOLO APLICA A PROMETHEUS LOCAL:** `avg_over_time`/
+   `stddev_over_time` sobre una ventana móvil de 30m se contaminan si el
+   propio fallo inyectado ocupa una fracción grande de esa ventana -- el
    umbral "persigue" al valor real y la alerta nunca dispara, aunque el
    error rate esté muy por encima de lo normal. Requiere dejar correr
    tráfico limpio ANTES de inyectar el fallo, el tiempo suficiente para
@@ -49,54 +49,90 @@ en vivo `error_rate`/`umbral`, y solo entonces dispara el fault -- ver
 Verifica en `http://localhost:9091/alerts` que `CorrelatedDegradation`
 pase de `inactive` a `pending` a `firing`.
 
-**Consecuencia práctica para el Experimento 2 en GCP (más abajo):** dado
-que la ventana de baseline en Cloud Monitoring es de **1 hora**, no de
-30 minutos, un warm-up de unos pocos minutos ayuda pero es proporcionalmente
-mucho más corto que en local -- si la alerta `correlated-degradation-data-service`
-no dispara en el primer intento en GCP, antes de asumir que el fix no
-sirve, confirma cuánto tráfico limpio real llevaba corriendo el clúster
-antes del fault (mientras más tiempo de operación normal previa, mejor
-calibrado el baseline).
+**CORRECCIÓN IMPORTANTE para el Experimento 2 en GCP (2026-08-30):** el
+párrafo anterior sobre una ventana de baseline de "1 hora" en la MQL de
+GCP describía el diseño ORIGINAL (baseline dinámico media+2σ con
+`mean_prev_by`/`stddev_prev_by`), que se abandonó -- ver
+`variables.tf`/`error_rate_threshold_pct` y la cabecera de
+`monitoring_aiops.tf` (hallazgo 3) para el porqué (esas funciones no
+existen en MQL). Las 3 policies de GCP que están APLICADAS ahora mismo
+(`correlated_degradation`, `correlated_degradation_data_service`,
+`naive_static_threshold`) usan un **umbral ESTÁTICO** sobre una tasa
+instantánea (`align rate(1m)`), sin ninguna ventana de baseline que deba
+"asentarse" -- **el warm-up largo (1800s=30min) del ejemplo de más abajo
+YA NO ES NECESARIO en GCP** y solo aplica en el sentido de "quiero ver
+tráfico limpio antes del fallo para el gráfico/reporte", no como
+requisito técnico. Un warm-up corto (60-120s) es suficiente para el
+Experimento 2 en GCP; el warm-up largo sigue siendo válido/recomendado
+solo si en algún momento se repite el ensayo LOCAL (Prometheus SÍ usa el
+baseline dinámico real de 30 min).
 
 ## Experimento 1 -- latencia 200ms en service-b
 
+**Hallazgo real (2026-08-30) sobre el modo "tc":** la imagen de service-b
+(`services/service-b/Dockerfile`) no traía `iproute2` (el paquete que da
+el binario `tc`) -- el modo `tc gke` habría fallado en el pod real con
+`tc: command not found`. Ya se agregó al Dockerfile, pero usarlo requiere
+reconstruir y volver a subir la imagen a Artifact Registry antes de poder
+usarlo (`docker build` + `docker push` + `kubectl rollout restart`). Para
+no perder tiempo en un rebuild, el modo recomendado AHORA es `env`
+(`INJECT_LATENCY_MS`, vía `kubectl set env` -- no requiere ningún cambio
+de imagen, ya está soportado por el código de `service-b` desde antes).
+Si más adelante hay tiempo/interés en el fallo de red "genuino" (`tc`),
+reconstruye la imagen primero.
+
+Nombres de alert policy confirmados en la consola real (ver
+`gcloud alpha monitoring policies list`, 2026-08-30):
+`observability-lab-gke-correlated-degradation`,
+`observability-lab-gke-correlated-degradation-data-service`,
+`observability-lab-gke-naive-static-5xx` (con el `-gke` del
+`cluster_name`, que un ejemplo anterior de este runbook omitía).
+
 ```bash
 # Terminal 1: tráfico de fondo (deja correr durante TODO el experimento)
-python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h4_gcp.csv
+python3 chaos/load_gen.py --url http://localhost:8000/orders/ord-1002 --duration 180 --out during_h4_gcp.csv
 
-# Terminal 2: inyecta el fallo vía tc netem en GKE
-./chaos/h4_latency_service_b.sh tc gke 60 observability-lab
-# (el modo "env ecs ..." es el equivalente para AWS Fargate -- no se ejecuta en esta entrega)
+# Terminal 2: inyecta el fallo (modo env -- no requiere rebuild de imagen)
+./chaos/h4_latency_service_b.sh env gke 60 observability-lab
+# (el modo "tc gke ..." queda disponible tras reconstruir la imagen; "env ecs ..." es el equivalente para AWS Fargate -- no se ejecuta en esta entrega)
 
 # Anota el FAULT_START impreso, y en paralelo (Terminal 3):
-python3 chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name observability-lab-correlated-degradation --fault-start <FAULT_START>
+python3 chaos/measure_mttd.py --backend gcp --project-id observabilidad-lab-507021 --alarm-name observability-lab-gke-correlated-degradation --fault-start <FAULT_START>
 ```
 
 ## Experimento 2 -- error rate 10% en data-service
 
-**Importante -- no dispares el fault de inmediato:** ver Paso 0 arriba
-(baseline envenenado si no hay tráfico limpio previo). Usa
-`chaos/run_experimento_d2.sh`, que ya encadena tráfico + warm-up + fault
-en el orden correcto:
+**Nota (2026-08-30): el aviso original de "no dispares el fault de
+inmediato" era por el baseline dinámico (media+2σ) que ya NO se usa en
+GCP** -- ver la corrección en el Paso 0 de arriba. Un warm-up corto ya es
+suficiente aquí; se deja el wrapper igual porque sigue siendo útil para
+tener tráfico limpio de referencia en el CSV/gráfico del reporte, no por
+necesidad técnica del umbral estático.
 
 ```bash
-./chaos/run_experimento_d2.sh gke 60 1800 observability-lab http://<endpoint>/orders/ord-1002
-# fault_s=60, warmup_s=1800 (30 min -- una fracción más razonable de la
-# ventana de 1h de Cloud Monitoring que los 5 min usados en el ensayo
-# local; ajustar según el tiempo/crédito disponible)
+./chaos/run_experimento_d2.sh gke 60 90 observability-lab http://localhost:8000/orders/ord-1002
+# fault_s=60, warmup_s=90 (suficiente para tener tráfico limpio de
+# referencia en el CSV -- ya NO hace falta 1800s, ver nota de arriba)
 ```
 
 Anota el `FAULT_START` que imprime `h5_error_rate_data_service.sh` (el
 script lo muestra en su salida) y mide el MTTD real:
 
 ```bash
-python chaos/measure_mttd.py --backend gcp --project-id <id> --alarm-name <cluster_name>-correlated-degradation-data-service --fault-start <FAULT_START>
+python3 chaos/measure_mttd.py --backend gcp --project-id observabilidad-lab-507021 --alarm-name observability-lab-gke-correlated-degradation-data-service --fault-start <FAULT_START>
 ```
 
 (Comando equivalente sin el wrapper, si se prefiere correr los pasos a
-mano: `python3 chaos/load_gen.py --url http://<endpoint>/orders/ord-1002 --duration 180 --out during_h5_gcp.csv &` seguido de
+mano: `python3 chaos/load_gen.py --url http://localhost:8000/orders/ord-1002 --duration 180 --out during_h5_gcp.csv &` seguido de
 `./chaos/h5_error_rate_data_service.sh gke 60 observability-lab` -- pero
-dejando pasar el warm-up de tráfico limpio ANTES del segundo comando.)
+dejando pasar el warm-up corto de tráfico limpio ANTES del segundo
+comando.)
+
+`measure_mttd.py --backend gcp` ahora sondea en vivo (cada 5s, hasta
+`--timeout-s`, default 900s=15min) usando `gcloud alpha monitoring alerts
+list` -- corre el comando de arriba EN PARALELO al fault (no después), y
+se queda esperando hasta ver el incidente `OPEN` o hasta agotar el
+timeout.
 
 ## Preguntas a responder con datos reales (para el reporte)
 
