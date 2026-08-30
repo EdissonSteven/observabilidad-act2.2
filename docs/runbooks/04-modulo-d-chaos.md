@@ -1,11 +1,60 @@
 # Runbook 4 -- Módulo D: Chaos Engineering controlado + MTTD
 
+> **ESTADO: EJECUTADO Y CERRADO (2026-08-30).** Los resultados reales, con
+> las 4 preguntas del final de este runbook ya respondidas con datos
+> medidos, están en **`docs/modulo-d-resultados.md`**. Este runbook queda
+> como procedimiento reproducible; lee ese documento primero si lo que
+> buscas son los hallazgos.
+>
+> **Resumen de lo que pasó:** los Experimentos 1 y 2 (de un solo síntoma)
+> NO dispararon las policies de correlación, por una razón estructural que
+> se confirmó midiendo -- una regla que exige `error_high AND latency_high`
+> no puede activarse con un fallo que produce solo una de las dos señales.
+> Se añadió el **Experimento 3 (combinado)**, que sí disparó, con
+> MTTD = 282 s.
+>
+> **Cambios de configuración desde la redacción original de este runbook:**
+> - Las 3 alert policies se migraron de MQL a **PromQL**
+>   (`condition_prometheus_query_language`), por verificabilidad -- ver el
+>   hallazgo 5 en la cabecera de `iac/terraform/gcp/monitoring_aiops.tf`.
+> - El SLO de latencia bajó de 300 ms a **250 ms**, para que coincida con
+>   una frontera real de bucket del histograma (`_SECONDS_BUCKETS` no
+>   incluye 0.3). Cualquier referencia a "300 ms" más abajo está obsoleta.
+> - El `duration` de las conditions bajó de 180 s a **60 s**.
+> - Antes de correr NADA de este runbook, aplica
+>   `iac/istio/peer-authentication-otel-collector-metrics-permissive.yaml`
+>   o el mTLS STRICT de Istio bloqueará el scraping de métricas y ninguna
+>   alerta podrá disparar (ver `iac/istio/README.md`).
+
 Requiere Módulo A y B ya desplegados y con alertas activas en GCP
 (Runbooks 1-2). **Alcance de esta entrega: solo GCP** -- los comandos
 `env ecs ...` de abajo quedan documentados como diseño de referencia para
 AWS Fargate, no se ejecutan. **Corre esto en UNA sola ventana de tiempo**
 -- son los pasos que más crédito/tiempo consumen; no los repitas sin
 necesidad.
+
+## Regla operativa aprendida (léela antes de diagnosticar cualquier "sin datos")
+
+**Valida siempre con tráfico activo.** Sin tráfico, `rate()` devuelve 0 en
+todos los buckets, `histogram_quantile` produce `NaN`, y Google Managed
+Prometheus DESCARTA el `NaN` (devuelve resultado vacío, no "NaN"). Durante
+la depuración esto produjo varios falsos "la métrica no existe" que
+desviaron el diagnóstico durante un buen rato. Si una consulta parece no
+tener datos, lo primero es comprobar que `load_gen.py` esté corriendo.
+
+Para consultar métricas sin depender de la UI de Metrics Explorer, usa la
+API PromQL de Cloud Monitoring
+(https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/query-api-ui):
+
+```bash
+TOK=$(gcloud auth print-access-token)
+API=https://monitoring.googleapis.com/v1/projects/<PROJECT_ID>/location/global/prometheus/api/v1/query
+curl -s "$API" --data-urlencode 'query=http_requests_total' -H "Authorization: Bearer $TOK" | jq '.data.result | length'
+```
+
+Ojo con los nombres: en esta API se usa el nombre NATIVO de Prometheus
+(`http_requests_total`); en MQL y en el selector de Metrics Explorer la
+misma métrica se llama `prometheus.googleapis.com/http_requests_total/counter`.
 
 ## Paso 0 -- Ensayo local antes de gastar presupuesto de GCP (recomendado)
 
@@ -134,7 +183,80 @@ list` -- corre el comando de arriba EN PARALELO al fault (no después), y
 se queda esperando hasta ver el incidente `OPEN` o hasta agotar el
 timeout.
 
+## Experimento 3 -- degradación CORRELACIONADA (latencia + errores a la vez)
+
+**Este es el experimento que efectivamente dispara las policies de
+correlación.** Los Experimentos 1 y 2 no pueden hacerlo: cada uno produce
+un solo síntoma, y las policies exigen los dos simultáneamente. No es un
+defecto de las reglas -- es exactamente lo que las hace menos ruidosas que
+`naive_static_threshold`. Ver la cabecera de
+`chaos/run_experimento_d3_combinado.sh` para el razonamiento completo y la
+evidencia que lo confirma.
+
+Simula la firma real de una dependencia degradada: se vuelve lenta **y**
+empieza a fallar al mismo tiempo (saturación de pool de conexiones, GC
+thrashing, disco degradado).
+
+```bash
+bash chaos/run_experimento_d3_combinado.sh observabilidad-lab-507021 360 60 observability-lab http://localhost:8000/orders/ord-1002
+```
+
+Inyecta 500 ms en `service-b` (contra un SLO de 250 ms) y 30 % de error
+rate en `data-service` (contra un umbral de 5 %) -- márgenes holgados a
+propósito. Cada 15 s consulta Cloud Monitoring en vivo e imprime el estado
+de AMBAS condiciones, con la forma exacta de las consultas que evalúan las
+policies:
+
+```
+05:48:00Z [fault] ds_error=13.5% (>5%? SI)  frac_bajo_0.25s=0.02 (<0.99? SI)  http_5xx=NODATA%
+```
+
+Si las dos salen en `SI` y aun así no dispara, el problema ya no es el
+experimento sino la policy. Ese log queda en `d3_combinado_*_probe.log` y
+sirve directo como evidencia.
+
+`fault_s = 360` es el mínimo prudente: debe cubrir el `duration` de 60 s,
+más la ventana `rate[2m]` que lo alimenta, más el retardo de ingesta, más
+el overhead de los rollouts de `kubectl set env` (~45 s).
+
+Mide el MTTD en paralelo, con el `FAULT_START` que imprime el script:
+
+```bash
+python3 chaos/measure_mttd.py --backend gcp --project-id observabilidad-lab-507021 \
+  --alarm-name observability-lab-gke-correlated-degradation-data-service \
+  --fault-start <FAULT_START>
+```
+
+## Análisis de SLO y error budget (preguntas 2 y 3, automatizado)
+
+`chaos/analyze_error_budget.py` responde las preguntas 2 y 3 de abajo desde
+el CSV real, comparando la ventana limpia contra la de fallo **del mismo
+CSV** (elimina la variabilidad entre corridas):
+
+```bash
+python3 chaos/analyze_error_budget.py \
+  --csv d3_combinado_<STAMP>.csv \
+  --loadgen-start <t0> --fault-start <t1> --fault-end <t2>
+```
+
+Cuidado con dónde pones `--fault-start`: si lo pones en el fin del rollout,
+los segundos de rollout quedan dentro de la ventana "limpia" y contaminan
+el baseline. Usa el instante en que se emitió el comando de inyección.
+
+El script cuenta "petición degradada" por DOS criterios separados a
+propósito: fallo HTTP (`status != 200`) y violación del SLO de latencia.
+En este sistema no coinciden, y esa divergencia es el resultado central del
+laboratorio -- ver `docs/modulo-d-resultados.md`.
+
 ## Preguntas a responder con datos reales (para el reporte)
+
+> **Ya respondidas con datos medidos en `docs/modulo-d-resultados.md`.**
+> Resumen: (1) MTTD = 282 s, NO cumple el objetivo de 120 s, y el piso lo
+> pone la latencia del pipeline de métricas, no la config de la alerta;
+> (2) sí, p50 3.3x y violación del SLO 15.71 % → 88.44 %; (3) sí, 2.31 %
+> del presupuesto mensual en ~7 min -- pero 0.00 % si el SLI fuera solo
+> códigos HTTP; (4) parcialmente, el contexto está en la documentación de
+> la policy pero el resumen del mensaje llega con `metric: __missing__`.
 
 1. **¿MTTD < 2 minutos?** Compara el `MTTD=...s` impreso por
    `measure_mttd.py` contra 120s, en CADA experimento y CADA nube donde se
